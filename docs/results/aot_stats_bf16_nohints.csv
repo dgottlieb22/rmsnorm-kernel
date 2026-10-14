@@ -1,5 +1,5 @@
-variant,kernel,m,n,dtype,arch,specialized,grid,num_warps,block_m,block_n,registers,spill_stores,spill_loads,stack_bytes,shared_bytes,programs_per_sm,occupancy,waves,limiter
-triton_v0_naive,_rmsnorm_row_kernel,4096,4096,bf16,sm_80,False,4096,4,1,4096,104,0,0,0,16,4,0.25,9.481481481481481,registers
-triton_v1_warps,_rmsnorm_row_kernel,4096,4096,bf16,sm_80,False,4096,16,1,4096,32,0,0,0,64,4,1.0,9.481481481481481,registers+warps
-triton_v0_naive,_rmsnorm_row_kernel,4096,16384,bf16,sm_80,False,4096,4,1,16384,255,188,188,192,16,2,0.125,18.962962962962962,registers
-triton_v1_warps,_rmsnorm_row_kernel,4096,16384,bf16,sm_80,False,4096,16,1,16384,110,0,0,0,64,1,0.25,37.925925925925924,registers
+variant,kernel,m,n,dtype,arch,specialized,grid,num_warps,block_m,block_n,align,registers,spill_stores,spill_loads,stack_bytes,shared_bytes,programs_per_sm,occupancy,waves,limiter,global_loads,global_stores
+triton_v0_naive,_rmsnorm_row_kernel,4096,4096,bf16,sm_80,False,4096,4,1,4096,16,120,0,0,0,16,4,0.25,9.481481481481481,registers,16:64,16:32
+triton_v1_warps,_rmsnorm_row_kernel,4096,4096,bf16,sm_80,False,4096,16,1,4096,16,32,0,0,0,64,4,1.0,9.481481481481481,registers+warps,16:16,16:8
+triton_v0_naive,_rmsnorm_row_kernel,4096,16384,bf16,sm_80,False,4096,4,1,16384,16,255,240,240,240,16,2,0.125,18.962962962962962,registers,16:256,16:128
+triton_v1_warps,_rmsnorm_row_kernel,4096,16384,bf16,sm_80,False,4096,16,1,16384,16,127,0,0,0,64,1,0.25,37.925925925925924,registers,16:64,16:32

@@ -68,6 +68,7 @@ class AotStats:
     num_warps: int
     block_m: int
     block_n: int
+    align: int
     registers: int
     spill_stores: int
     spill_loads: int
@@ -77,6 +78,8 @@ class AotStats:
     occupancy: float
     waves: float
     limiter: str
+    global_loads: str = ""   # PTX global loads by width in bits, "128:8 16:2"
+    global_stores: str = ""
 
 
 def _ptxas_path() -> str:
@@ -97,7 +100,11 @@ def signature_and_attrs(plan: LaunchPlan, dtype: torch.dtype, m: int, n: int, sp
     """
     kernel = plan.kernel
     dt = TRITON_DTYPE[dtype]
-    values = {"stride_xm": n, "stride_rm": n, "stride_ym": n, "stride_sm": n, "N": n, "M": m}
+    align = plan.constexprs.get("ALIGN", 1)
+    # Contiguous rows: every row stride equals N. Strides and N are passed
+    # divided by ALIGN, as the wrappers do.
+    values = {name: n // align for name in ("stride_xm_div", "stride_rm_div", "stride_ym_div", "stride_sm_div", "N_div")}
+    values["M"] = m
     signature: dict = {}
     attrs: dict = {}
     for idx, name in enumerate(kernel.arg_names):
@@ -131,6 +138,24 @@ def compile_plan(plan: LaunchPlan, dtype: torch.dtype, m: int, n: int, arch: str
 
 _USED_RE = re.compile(r"Used (\d+) registers")
 _SPILL_RE = re.compile(r"(\d+) bytes stack frame, (\d+) bytes spill stores, (\d+) bytes spill loads")
+_ACCESS_RE = re.compile(r"\b(ld|st)\.global(?:\.[a-z]+)*\.(v\d\.)?(?:b|u|s|f)(\d+)")
+
+
+def access_widths(ptx: str) -> tuple[str, str]:
+    """Global load and store instructions in the PTX by access width in bits, e.g. ``"128:8"``.
+
+    One 128-bit access per thread per 8 bf16 elements is the widest the
+    hardware offers and what a coalesced kernel should show; 16-bit entries
+    mean scalar bf16 accesses, eight times the instructions for the same bytes.
+    """
+    loads: dict[int, int] = {}
+    stores: dict[int, int] = {}
+    for op, vec, bits in _ACCESS_RE.findall(ptx):
+        width = int(bits) * (int(vec[1]) if vec else 1)
+        target = loads if op == "ld" else stores
+        target[width] = target.get(width, 0) + 1
+    fmt = lambda d: " ".join(f"{w}:{c}" for w, c in sorted(d.items(), reverse=True)) or "-"  # noqa: E731
+    return fmt(loads), fmt(stores)
 
 
 def ptxas_resources(ptx: str, arch: str) -> dict:
@@ -162,6 +187,7 @@ def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, speci
     plan = plan_for(variant, m, n)
     compiled = compile_plan(plan, dtype, m, n, arch, specialize)
     res = ptxas_resources(compiled.asm["ptx"], arch)
+    loads, stores = access_widths(compiled.asm["ptx"])
     shared = int(getattr(compiled.metadata, "shared", 0) or 0)
     limits = ARCHS[arch]
     programs, occ, limiter = occupancy(res["registers"], plan.num_warps, shared, limits)
@@ -170,9 +196,10 @@ def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, speci
         variant=variant, kernel=plan.kernel_name, m=m, n=n, dtype=TRITON_DTYPE[dtype], arch=arch,
         specialized=specialize,
         grid=plan.grid, num_warps=plan.num_warps, block_m=plan.block_m, block_n=plan.block_n,
+        align=plan.constexprs.get("ALIGN", 1),
         registers=res["registers"], spill_stores=res["spill_stores"], spill_loads=res["spill_loads"],
         stack_bytes=res["stack_bytes"], shared_bytes=shared, programs_per_sm=programs, occupancy=occ,
-        waves=waves, limiter=limiter,
+        waves=waves, limiter=limiter, global_loads=loads, global_stores=stores,
     )
 
 
@@ -193,7 +220,8 @@ def collect(variants: Sequence[str] = DEFAULT_VARIANTS, ns: Sequence[int] = DEFA
                     rows.append(s)
                     if log:
                         log(f"{arch} {s.dtype} N={n:>6} {variant:<26} warps={s.num_warps:>2} block={s.block_m}x{s.block_n:<6} "
-                            f"regs={s.registers:>3} spill={s.spill_stores:>4}B occ={s.occupancy:.0%} ({s.limiter})")
+                            f"align={s.align:>2} regs={s.registers:>3} spill={s.spill_stores:>4}B occ={s.occupancy:.0%} "
+                            f"({s.limiter}) ld[{s.global_loads}] st[{s.global_stores}]")
     return rows
 
 
@@ -207,14 +235,14 @@ def write_csv(path: Path, rows: Sequence[AotStats]) -> None:
 
 
 def render_markdown(rows: Sequence[AotStats]) -> str:
-    lines = ["| arch | variant | dtype | hints | M x N | grid | warps | block | regs | spill B (st/ld) | smem B | programs/SM | occupancy | waves | limiter |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| arch | variant | dtype | hints | M x N | grid | warps | block | ALIGN | regs | spill B (st/ld) | smem B | programs/SM | occupancy | waves | limiter | global ld (bits:count) | global st |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         block = f"{r.block_m}x{r.block_n}" if r.block_m > 1 else str(r.block_n)
         hints = "yes" if r.specialized else "no"
-        lines.append(f"| {r.arch} | {r.variant} | {r.dtype} | {hints} | {r.m}x{r.n} | {r.grid} | {r.num_warps} | {block} | {r.registers} | "
+        lines.append(f"| {r.arch} | {r.variant} | {r.dtype} | {hints} | {r.m}x{r.n} | {r.grid} | {r.num_warps} | {block} | {r.align} | {r.registers} | "
                      f"{r.spill_stores}/{r.spill_loads} | {r.shared_bytes} | {r.programs_per_sm} | {r.occupancy:.0%} | "
-                     f"{r.waves:.2f} | {r.limiter} |")
+                     f"{r.waves:.2f} | {r.limiter} | {r.global_loads} | {r.global_stores} |")
     return "\n".join(lines)
 
 

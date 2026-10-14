@@ -8,8 +8,8 @@ number. It is being able to say, for every implementation and every shape,
 why it runs as fast as it does, and to show the measurement that supports
 the claim.
 
-Status, stated plainly: the implementations, the correctness suite (1139
-tests; 992 run on a CPU-only host, the rest need a GPU or a working
+Status, stated plainly: the implementations, the correctness suite (1141
+tests; 994 run on a CPU-only host, the rest need a GPU or a working
 `torch.compile`), the benchmark harness, the profiling tooling and the
 performance model are complete. This was built on a machine without a GPU;
 the Triton kernels were verified through Triton's CPU interpreter, and their
@@ -94,8 +94,12 @@ performance to one change in code.
 
   ```python
   @triton.jit
-  def _rmsnorm_row_kernel(x_ptr, w_ptr, y_ptr, stride_xm, stride_ym, N, eps, BLOCK_N: tl.constexpr):
-      row = tl.program_id(0)
+  def _rmsnorm_row_kernel(x_ptr, w_ptr, y_ptr, stride_xm_div, stride_ym_div, N_div, eps,
+                          BLOCK_N: tl.constexpr, ALIGN: tl.constexpr):
+      stride_xm = stride_xm_div * ALIGN   # strides and N arrive divided by ALIGN;
+      stride_ym = stride_ym_div * ALIGN   # the product makes their divisibility
+      N = N_div * ALIGN                   # visible to the compiler (diary H12)
+      row = tl.program_id(0).to(tl.int64)
       cols = tl.arange(0, BLOCK_N)
       mask = cols < N
       x = tl.load(x_ptr + row * stride_xm + cols, mask=mask, other=0.0).to(tl.float32)
@@ -124,7 +128,11 @@ performance to one change in code.
 
 All kernels square and accumulate in float32 whatever the storage dtype, and
 every load is masked to N so non-power-of-two hidden sizes (5120, 11008)
-are handled without padding the tensors.
+are handled without padding the tensors. Strides and N are passed divided by
+a compile-time `ALIGN` and multiplied back inside the kernel, so the compiler
+can prove 16-byte alignment for hidden sizes like 1000 that the launcher's
+own divisible-by-16 hint misses (section 5 and diary H12 show what that
+changes in the generated code).
 
 ### Vendor kernels (`rmsnorm/external.py`)
 
@@ -207,29 +215,41 @@ M = 4096; the full table for sm_80 and sm_90 is `docs/results/aot_stats_bf16.md`
 
 | N | v0 naive (4 warps) | v1 warps | v2 looped (4096 chunks) | v3 multirow |
 |---|---|---|---|---|
-| 512 | 20 regs, 100% occ | 2 warps, 24 regs, 100% | 32 regs, 100% | 8x512 block, 16 warps, 28 regs, 100%, grid 512 |
-| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 27 regs, 100% |
+| 512 | 20 regs, 100% occ, 64-bit accesses | 2 warps, 24 regs, 100%, 128-bit | 32 regs, 100% | 8x512 block, 16 warps, 27 regs, 100%, grid 512 |
+| 1000 | 26 regs, 100%, 128-bit (ALIGN 8) | 4 warps, 26 regs, 100% | 32 regs, 100% | 4x1024, 28 regs, 100% |
+| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 29 regs, 100% |
 | 4096 | 62 regs, 50% | 16 warps, 26 regs, 100% | 32 regs, 100% | 1x4096, 28 regs, 100% |
-| 5120 / 8192 | 125 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% |
-| 16384 | 213 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% |
+| 5120 / 8192 | 127 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% |
+| 16384 | 218 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% |
 
-No variant spills at any shape in the matrix. Three things this already
-settles (diary H3, H4, H12, H13):
+Every access in this table is a 128-bit vector per thread except where
+marked. No variant spills at any shape in the matrix. Four things this
+already settles (diary H3, H4, H12, H13):
 
 - The naive kernel's problem on long rows is register-capped occupancy, not
-  spilling: 213 registers per thread at N = 16384 leaves room for 2 programs
+  spilling: 218 registers per thread at N = 16384 leaves room for 2 programs
   of 4 warps per SM. The model's first guess (spills) was wrong and is
   corrected in the diary, not erased.
 - The 8-elements-per-thread heuristic holds registers at 26 wherever it can
   reach 8; once the 16-warp cap forces 16 and 32 elements per thread
   (N >= 8192) occupancy drops to 75% and 50%. The looped kernel is flat at 32
   registers and 100% at every N.
-- The launcher's 16-byte divisibility hints are part of the kernel. Compiled
-  without them (`aot --no-specialize`, the code path a misaligned pointer or
-  a stride not divisible by 16 takes), v0 at N = 16384 needs all 255
-  registers and spills 188 bytes, and v1's count rises from 63 to 110. A
-  hidden size of 1000 compiles to a kernel that stages data through 2 KB of
-  shared memory to convert layouts; 1024 needs 16 bytes.
+- Alignment hints are part of the kernel. The launcher marks 16-byte-aligned
+  pointers and integers divisible by 16; with them `v1` at N = 4096 is two
+  128-bit loads and one 128-bit store per thread, without them (a misaligned
+  pointer) it is sixteen 16-bit loads and eight 16-bit stores, and at
+  N = 16384 `v0` goes from 218 registers to 255 with 240 bytes of spills.
+  A hidden size of 1000, whose stride is not divisible by 16, originally
+  compiled to 16-bit accesses plus a 2 KB shared-memory layout conversion.
+  One change fixed it: the wrappers pass strides and N divided by a
+  compile-time `ALIGN` (the largest power of two up to 16 dividing them) and
+  the kernel multiplies back, which the compiler's divisibility analysis can
+  see. N = 1000 now compiles to the same code as N = 1024. `tl.multiple_of`
+  on the scalar arguments was tried first and changed nothing.
+- `v0` at N = 512 issues 64-bit accesses because each of its 128 threads
+  owns only 4 elements; `v1` drops to 2 warps there so every thread owns 8
+  and the accesses are 128-bit. Whether that matters at 1 KB per row is a
+  timing question.
 
 ### Pending hardware: timing and profiles
 
@@ -325,8 +345,8 @@ per layer.
 | What changed when you altered the tile size? | H4 (warps per row), H5b (chunk width), H6b (rows per program); `stats` output for registers and occupancy |
 | What does occupancy mean here? | model section 3 (resident warps vs the limit, which resource binds, Little's law for bytes in flight); `stats` limiter column |
 | Why is your kernel faster at hidden size 4096 but slower at 512? | model section 3 (instruction-bound regime), H3 and H6 |
-| Why does the naive kernel degrade at N = 16384? | H3, measured at compile time: 213 registers per thread caps residency at 2 programs x 4 warps per SM (12.5% occupancy); no spills. The timing half is pending |
-| Why do alignment hints matter? | H12, measured at compile time: without 16-byte divisibility hints the same kernel needs 255 registers and spills; a hidden size of 1000 compiles to a layout conversion through shared memory |
+| Why does the naive kernel degrade at N = 16384? | H3, measured at compile time: 218 registers per thread caps residency at 2 programs x 4 warps per SM (12.5% occupancy); no spills. The timing half is pending |
+| Why do alignment hints matter, and what did you do about them? | H12, measured at compile time: with the hints each thread does 128-bit accesses; without them 16-bit scalars, 255 registers and spills on the longest row. Passing strides and N divided by a compile-time ALIGN restored 128-bit accesses for N = 1000 |
 | When does fusion help and by how much? | model section 1 (4 vs 5 bytes per element), H9 |
 | Why not trust a warm-cache benchmark? | H10 and the methodology |
 | Why is M = 1 slow for every implementation? | H11: launch-bound; host time vs GPU time table |
@@ -338,7 +358,7 @@ CPU (correctness only; Triton kernels run through the interpreter):
 
 ```
 make venv-cpu      # torch 2.8.0+cpu from the PyTorch CPU index, triton 3.4.0
-make test          # 986 pass here; torch.compile tests skip when the host cannot build C++ extensions
+make test          # 994 pass here; torch.compile tests skip when the host cannot build C++ extensions
 ```
 
 GPU:

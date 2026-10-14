@@ -42,13 +42,35 @@ def hinted(tmp_path_factory):
     return _run_aot(tmp_path_factory.mktemp("aot"),
                     "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--impl", "triton_v2_looped",
                     "--impl", "triton_v3_multirow",
-                    "--n", "512", "--n", "4096", "--n", "8192", "--n", "16384")
+                    "--n", "512", "--n", "1000", "--n", "1024", "--n", "4096", "--n", "8192", "--n", "16384")
 
 
 @pytest.fixture(scope="module")
 def unhinted(tmp_path_factory):
     return _run_aot(tmp_path_factory.mktemp("aot_nohints"), "--no-specialize",
-                    "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--n", "16384")
+                    "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--n", "4096", "--n", "16384")
+
+
+def test_hidden_size_1000_compiles_like_1024(hinted):
+    """The ALIGN constexpr carries the stride's divisibility by 8, so N = 1000 gets the same
+    128-bit accesses, registers and 16 bytes of shared memory as N = 1024 (diary H12)."""
+    for variant in ("triton_v0_naive", "triton_v1_warps"):
+        a, b = hinted[(variant, 1000, True)], hinted[(variant, 1024, True)]
+        assert a["align"] == "8" and b["align"] == "16"
+        assert (a["registers"], a["shared_bytes"], a["global_loads"], a["global_stores"]) == \
+               (b["registers"], b["shared_bytes"], b["global_loads"], b["global_stores"])
+        assert a["global_loads"] == "128:2" and a["global_stores"] == "128:1"
+
+
+def test_access_widths_with_and_without_pointer_hints(hinted, unhinted):
+    """Aligned pointers: one 128-bit access per 8 elements per thread. Misaligned: 16-bit scalars."""
+    v1 = hinted[("triton_v1_warps", 4096, True)]
+    assert (v1["global_loads"], v1["global_stores"]) == ("128:2", "128:1")
+    v1p = unhinted[("triton_v1_warps", 4096, False)]
+    assert (v1p["global_loads"], v1p["global_stores"]) == ("16:16", "16:8")
+    # v0 at N = 512 has 4 elements per thread: 64-bit accesses, half the width.
+    v0 = hinted[("triton_v0_naive", 512, True)]
+    assert v0["global_loads"] == "64:2"
 
 
 def test_naive_long_row_is_register_limited_not_spilling(hinted):
@@ -81,8 +103,8 @@ def test_naive_kernel_at_4096_is_half_occupancy_from_registers(hinted):
 
 
 def test_dropping_alignment_hints_costs_registers_and_spills(hinted, unhinted):
-    """Without the launcher's 16-byte divisibility hints the same v0 kernel at N = 16384
-    needs all 255 registers and spills; v1's register count nearly doubles."""
+    """Without the pointers' 16-byte divisibility hints (a misaligned input) the same v0 kernel at
+    N = 16384 needs all 255 registers and spills; v1's register count doubles."""
     h = hinted[("triton_v0_naive", 16384, True)]
     p = unhinted[("triton_v0_naive", 16384, False)]
     assert int(p["registers"]) > int(h["registers"])

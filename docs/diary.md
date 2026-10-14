@@ -93,10 +93,13 @@ full table in `docs/results/aot_stats_bf16.md`):
 | 2048 | 2048 | 4 | 38 / 38 | 0 | 12 | 75% |
 | 4096 | 4096 | 4 | 62 / 60 | 0 | 8 | 50% |
 | 5120, 8192 | 8192 | 4 | 125 / 127 | 0 | 4 | 25% |
-| 16384 | 16384 | 4 | 213 / 216 | 0 | 2 | 12.5% |
+| 16384 | 16384 | 4 | 218 / 216 | 0 | 2 | 12.5% |
+
+(The v0 row at 16384 read 213 registers before the ALIGN change of H12 added
+three multiplies; the occupancy did not move.)
 
 The spill prediction was wrong: with the alignment hints the launcher passes
-(see H12), the compiler fits N = 16384 in 213 registers with no spill. What
+(see H12), the compiler fits N = 16384 in about 215 registers with no spill. What
 does happen is that registers cap residency at 2 programs x 4 warps = 8
 warps per SM, 12.5% occupancy, falling by half at every doubling of N from
 2048 up. Each of those 128 threads keeps 128 elements (16 vector loads) in
@@ -142,7 +145,7 @@ Result (compile-time half, measured here with `aot`, sm_80, bf16):
 | 2048 | 4 / 38 / 75% | 8 / 26 / 100% |
 | 4096 | 4 / 62 / 50% | 16 / 26 / 100% |
 | 8192 | 4 / 125 / 25% | 16 / 38 / 75% |
-| 16384 | 4 / 213 / 12.5% | 16 / 63 / 50% |
+| 16384 | 4 / 218 / 12.5% | 16 / 63 / 50% |
 
 Registers per thread scale with elements per thread, as expected: 8 elements
 per thread is 26 registers at every N where the heuristic reaches it. From
@@ -353,41 +356,63 @@ more live values. The same source therefore compiles to a worse kernel for a
 misaligned input (a slice starting at an odd element) or for a row stride not
 divisible by 16 (a hidden size such as 1000).
 
-Change: none in code; `aot --no-specialize` compiles the hint-free variant.
-
-Measurement:
+Measurement (compile-time, `aot`, sm_80, bf16; the `aot` table now counts
+global load and store instructions in the PTX by width):
 ```
-python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --n 4096 --n 16384 --arch sm_80
+python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --n 1000 --n 1024 --n 4096 --n 16384 --arch sm_80
 python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --n 4096 --n 16384 --arch sm_80 --no-specialize
-python -m rmsnorm.cli aot --impl triton_v1_warps --n 1000 --n 1024 --arch sm_80
 ```
 
-Result (compile-time, measured here, sm_80, bf16):
+Result, part 1 (before any code change): the mechanism is exactly the access
+width. With hints, `triton_v1_warps` at N = 4096 is two 128-bit loads and one
+128-bit store per thread (x, w; y). Without hints it is sixteen 16-bit loads
+and eight 16-bit stores: the same bytes as scalar bf16 accesses, eight times
+the instructions, each with its own address and predicate. Registers follow:
 
-| kernel | hints | registers | spills | occupancy |
-|---|---|---|---|---|
-| v0, N = 4096, 4 warps | yes | 62 | 0 | 50% |
-| v0, N = 4096, 4 warps | no | 104 | 0 | 25% |
-| v0, N = 16384, 4 warps | yes | 213 | 0 | 12.5% |
-| v0, N = 16384, 4 warps | no | 255 | 188 B stores, 188 B loads | 12.5% |
-| v1, N = 16384, 16 warps | yes | 63 | 0 | 50% |
-| v1, N = 16384, 16 warps | no | 110 | 0 | 25% |
+| kernel | hints | registers | spills | occupancy | global accesses per thread |
+|---|---|---|---|---|---|
+| v0, N = 4096, 4 warps | yes | 62 | 0 | 50% | 8 x 128-bit loads, 4 stores |
+| v0, N = 4096, 4 warps | no | 120 | 0 | 25% | 64 x 16-bit loads, 32 stores |
+| v0, N = 16384, 4 warps | yes | 218 | 0 | 12.5% | 32 x 128-bit, 16 |
+| v0, N = 16384, 4 warps | no | 255 | 240 B stores, 240 B loads | 12.5% | 256 x 16-bit, 128 |
+| v1, N = 16384, 16 warps | yes | 63 | 0 | 50% | 8 x 128-bit, 4 |
+| v1, N = 16384, 16 warps | no | 127 | 0 | 25% | 64 x 16-bit, 32 |
 
-And N = 1000 against N = 1024 (stride 1000 is not divisible by 16, so the
-stride argument loses its hint while the pointers keep theirs): registers
-30 against 26, and 2048 bytes of shared memory against 16. The compiler
-routes the data through shared memory to convert between the load and store
-layouts it had to pick without the stride hint. So a hidden size that is not
-a multiple of 8 elements (16 bytes in bf16) runs a different kernel; the
-timing matrix has 5120 and 11008, both multiples of 16, and should gain a
-N = 1000-class shape to measure this. The runtime consequence of the
-misaligned path, where a model would hit it (slicing the hidden dimension),
-is PENDING HARDWARE.
+And N = 1000 against 1024 before the fix: the pointers kept their hints but
+the stride (1000) and N lost theirs, so the row base offset was unprovable:
+16-bit accesses, 30 registers against 26, and 2048 bytes of shared memory
+against 16 (a layout conversion between the load and store layouts the
+compiler had to pick without the hint).
+
+Change (one, in all four kernels): the wrappers compute `ALIGN`, the largest
+power of two up to 16 dividing N and every row stride, pass the strides and
+N divided by it, and the kernel multiplies them back (`N = N_div * ALIGN`).
+The multiplication by a compile-time constant is what the compiler's
+divisibility analysis can see, where `tl.multiple_of` on the scalar
+arguments did nothing (tried first; the PTX did not change). The launcher's
+own granularity is 16 elements; 8 bf16 elements are already one 128-bit
+access, so ALIGN = 8 is enough.
+
+Result, part 2 (after the change): N = 1000 compiles to the same code as
+N = 1024 for the row kernels: 26 registers, 16 bytes of shared memory, two
+128-bit loads and one 128-bit store per thread (`tests/test_aot_stats.py`
+pins this). N = 1004 (ALIGN = 4) gets 64-bit accesses and keeps the 2 KB
+layout conversion. Cost: v0 at N = 16384 went from 213 to 218 registers for
+the three extra multiplies; occupancy unchanged. All hinted shapes otherwise
+compile to identical access patterns.
+
+What the change cannot fix: a misaligned pointer. The `--no-specialize`
+column above is now that case (ALIGN still carries the stride information),
+and it stays scalar. The remedy there is a contiguous copy before the
+kernel, whose cost against the scalar kernel is a timing question, PENDING
+HARDWARE, along with the runtime effect of the N = 1000 fix (the full
+matrix now contains N = 1000).
 
 Explanation: the hints are what let the compiler prove that a 16-byte vector
-access is in bounds and aligned. Without proof it falls back to scalar or
-narrower accesses, each with its own address and predicate, which is where
-the extra registers go.
+access is in bounds and aligned. Without proof it falls back to scalar
+accesses, each with its own address and predicate, which is where the extra
+registers go; on the longest row that pushes past the register file and into
+spills.
 
 ---
 

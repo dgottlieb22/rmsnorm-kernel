@@ -99,9 +99,9 @@ if HAS_TRITON:
     @triton.jit
     def _rmsnorm_row_kernel(
         x_ptr, w_ptr, y_ptr,
-        stride_xm, stride_ym,
-        N, eps,
-        BLOCK_N: tl.constexpr,
+        stride_xm_div, stride_ym_div,
+        N_div, eps,
+        BLOCK_N: tl.constexpr, ALIGN: tl.constexpr,
     ):
         """One program normalizes one row held entirely in a BLOCK_N-wide block.
 
@@ -111,7 +111,17 @@ if HAS_TRITON:
         registers; nothing wider than the input dtype touches memory. The row
         offset is a 64-bit scalar so tensors past 2^31 elements index
         correctly; the column vector stays 32-bit.
+
+        Strides and N arrive divided by ``ALIGN`` (the largest power of two up
+        to 16 that divides all of them) and are multiplied back here. The
+        product carries the divisibility into the compiler's alignment
+        analysis, which is what lets it emit 128-bit loads and stores for a
+        row length such as 1000 that the launcher's own divisible-by-16 hint
+        does not cover (diary H12).
         """
+        stride_xm = stride_xm_div * ALIGN
+        stride_ym = stride_ym_div * ALIGN
+        N = N_div * ALIGN
         row = tl.program_id(0).to(tl.int64)
         cols = tl.arange(0, BLOCK_N)
         mask = cols < N
@@ -125,9 +135,9 @@ if HAS_TRITON:
     @triton.jit
     def _rmsnorm_looped_kernel(
         x_ptr, w_ptr, y_ptr,
-        stride_xm, stride_ym,
-        N, eps,
-        BLOCK_N: tl.constexpr,
+        stride_xm_div, stride_ym_div,
+        N_div, eps,
+        BLOCK_N: tl.constexpr, ALIGN: tl.constexpr,
     ):
         """Two passes over the row in BLOCK_N chunks.
 
@@ -136,6 +146,9 @@ if HAS_TRITON:
         chunk). Pass 2 re-reads the row, which by then sits in L2, and writes
         the output. Register use is bounded by BLOCK_N, not by N.
         """
+        stride_xm = stride_xm_div * ALIGN
+        stride_ym = stride_ym_div * ALIGN
+        N = N_div * ALIGN
         row = tl.program_id(0).to(tl.int64)
         x_row = x_ptr + row * stride_xm
         y_row = y_ptr + row * stride_ym
@@ -158,9 +171,9 @@ if HAS_TRITON:
     @triton.jit
     def _rmsnorm_multirow_kernel(
         x_ptr, w_ptr, y_ptr,
-        stride_xm, stride_ym,
-        M, N, eps,
-        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+        stride_xm_div, stride_ym_div,
+        M, N_div, eps,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, ALIGN: tl.constexpr,
     ):
         """BLOCK_M rows per program as a [BLOCK_M, BLOCK_N] block.
 
@@ -168,6 +181,9 @@ if HAS_TRITON:
         reduction runs along axis 1 so each row still gets its own rstd.
         Rows past M are masked off in the last program.
         """
+        stride_xm = stride_xm_div * ALIGN
+        stride_ym = stride_ym_div * ALIGN
+        N = N_div * ALIGN
         pid = tl.program_id(0).to(tl.int64)
         rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
         cols = tl.arange(0, BLOCK_N)
@@ -186,9 +202,9 @@ if HAS_TRITON:
     @triton.jit
     def _rmsnorm_fused_residual_kernel(
         x_ptr, r_ptr, w_ptr, y_ptr, s_ptr,
-        stride_xm, stride_rm, stride_ym, stride_sm,
-        N, eps,
-        BLOCK_N: tl.constexpr,
+        stride_xm_div, stride_rm_div, stride_ym_div, stride_sm_div,
+        N_div, eps,
+        BLOCK_N: tl.constexpr, ALIGN: tl.constexpr,
     ):
         """y = rmsnorm(x + r); s = x + r, both from one read of x and r.
 
@@ -197,6 +213,11 @@ if HAS_TRITON:
         more precise value the unfused path never sees. The rounding is a
         register-only cast; it adds no memory traffic.
         """
+        stride_xm = stride_xm_div * ALIGN
+        stride_rm = stride_rm_div * ALIGN
+        stride_ym = stride_ym_div * ALIGN
+        stride_sm = stride_sm_div * ALIGN
+        N = N_div * ALIGN
         row = tl.program_id(0).to(tl.int64)
         cols = tl.arange(0, BLOCK_N)
         mask = cols < N
@@ -249,58 +270,79 @@ def _rows_per_program(block_n: int, target_elems: int = 4096) -> int:
     return max(1, min(64, target_elems // block_n))
 
 
-def plan_row(m: int, n: int, num_warps: int | None = None, variant: str = "triton_v1_warps") -> LaunchPlan:
+def alignment(*values: int, cap: int = 16) -> int:
+    """Largest power of two up to ``cap`` that divides every value (1 if any is odd).
+
+    Used as the ``ALIGN`` constexpr: strides and N are passed divided by it
+    and multiplied back inside the kernel, so the compiler can see their
+    divisibility. 8 bf16 elements are one 128-bit access, so 8 is enough for
+    full-width loads; 16 is the launcher's own hint granularity.
+    """
+    a = cap
+    while a > 1 and any(v % a for v in values):
+        a //= 2
+    return a
+
+
+def plan_row(m: int, n: int, num_warps: int | None = None, variant: str = "triton_v1_warps",
+             row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     """Single-row kernel. ``num_warps=None`` applies the 8-elements-per-thread heuristic (v1)."""
     if n > MAX_SINGLE_BLOCK_N:
         raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}; use the looped kernel")
     block_n = triton.next_power_of_2(n)
     warps = _warps_for(block_n) if num_warps is None else num_warps
-    return LaunchPlan(variant, "_rmsnorm_row_kernel", {"BLOCK_N": block_n}, warps, m)
+    align = alignment(n, *(row_strides or (n,)))
+    return LaunchPlan(variant, "_rmsnorm_row_kernel", {"BLOCK_N": block_n, "ALIGN": align}, warps, m)
 
 
-def plan_looped(m: int, n: int, block_n: int = LOOPED_BLOCK_N) -> LaunchPlan:
+def plan_looped(m: int, n: int, block_n: int = LOOPED_BLOCK_N, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     if block_n & (block_n - 1):
         raise ValueError(f"block_n must be a power of two, got {block_n}")
     block_n = min(block_n, triton.next_power_of_2(n))
-    return LaunchPlan("triton_v2_looped", "_rmsnorm_looped_kernel", {"BLOCK_N": block_n}, _warps_for(block_n), m)
+    align = alignment(n, *(row_strides or (n,)))
+    return LaunchPlan("triton_v2_looped", "_rmsnorm_looped_kernel", {"BLOCK_N": block_n, "ALIGN": align},
+                      _warps_for(block_n), m)
 
 
-def plan_multirow(m: int, n: int, block_m: int | None = None) -> LaunchPlan:
+def plan_multirow(m: int, n: int, block_m: int | None = None, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     block_n = triton.next_power_of_2(n)
     if block_m is None:
         block_m = _rows_per_program(block_n)
     if block_m & (block_m - 1):
         raise ValueError(f"block_m must be a power of two, got {block_m}")
-    return LaunchPlan("triton_v3_multirow", "_rmsnorm_multirow_kernel", {"BLOCK_M": block_m, "BLOCK_N": block_n},
+    align = alignment(n, *(row_strides or (n,)))
+    return LaunchPlan("triton_v3_multirow", "_rmsnorm_multirow_kernel",
+                      {"BLOCK_M": block_m, "BLOCK_N": block_n, "ALIGN": align},
                       _warps_for(block_m * block_n), triton.cdiv(m, block_m))
 
 
-def plan_fused_residual(m: int, n: int) -> LaunchPlan:
+def plan_fused_residual(m: int, n: int, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     if n > MAX_SINGLE_BLOCK_N:
         raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}")
     block_n = triton.next_power_of_2(n)
-    return LaunchPlan("triton_v4_fused_residual", "_rmsnorm_fused_residual_kernel", {"BLOCK_N": block_n},
-                      _warps_for(block_n), m)
+    align = alignment(n, *(row_strides or (n,)))
+    return LaunchPlan("triton_v4_fused_residual", "_rmsnorm_fused_residual_kernel",
+                      {"BLOCK_N": block_n, "ALIGN": align}, _warps_for(block_n), m)
 
 
-def plan_for(variant: str, m: int, n: int) -> LaunchPlan:
+def plan_for(variant: str, m: int, n: int, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     """The plan each registered variant launches at (M, N), including the dispatcher's choice."""
     if variant == "triton_v0_naive":
-        return plan_row(m, n, num_warps=4, variant=variant)
+        return plan_row(m, n, num_warps=4, variant=variant, row_strides=row_strides)
     if variant == "triton_v1_warps":
-        return plan_row(m, n)
+        return plan_row(m, n, row_strides=row_strides)
     if variant == "triton_v2_looped":
-        return plan_looped(m, n)
+        return plan_looped(m, n, row_strides=row_strides)
     if variant == "triton_v3_multirow":
-        return plan_multirow(m, n)
+        return plan_multirow(m, n, row_strides=row_strides)
     if variant == "triton_v4_fused_residual":
-        return plan_fused_residual(m, n)
+        return plan_fused_residual(m, n, row_strides=row_strides)
     if variant == "triton":
         if n <= MULTIROW_MAX_N:
-            return plan_multirow(m, n)
+            return plan_multirow(m, n, row_strides=row_strides)
         if n >= LOOPED_MIN_N:
-            return plan_looped(m, n)
-        return plan_row(m, n)
+            return plan_looped(m, n, row_strides=row_strides)
+        return plan_row(m, n, row_strides=row_strides)
     raise KeyError(variant)
 
 
@@ -316,11 +358,12 @@ def _run_plain(plan_fn, x: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     y = torch.empty_like(x2)
     if m == 0:
         return y.view(x.shape)
-    plan = plan_fn(m, n)
+    plan = plan_fn(m, n, (x2.stride(0), y.stride(0)))
+    a = plan.constexprs["ALIGN"]
     if plan.kernel_name == "_rmsnorm_multirow_kernel":
-        args = (x2, weight.contiguous(), y, x2.stride(0), y.stride(0), m, n, eps)
+        args = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a, m, n // a, eps)
     else:
-        args = (x2, weight.contiguous(), y, x2.stride(0), y.stride(0), n, eps)
+        args = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a, n // a, eps)
     _launch(plan, *args)
     return y.view(x.shape)
 
@@ -329,14 +372,15 @@ def rmsnorm_triton_v0_naive(x: torch.Tensor, weight: torch.Tensor, eps: float = 
     """One row per program, whole row in one block, 4 warps for every N."""
     _require_triton()
     _check_shapes(x, weight)
-    return _run_plain(lambda m, n: plan_row(m, n, num_warps=4, variant="triton_v0_naive"), x, weight, eps)
+    return _run_plain(lambda m, n, s: plan_row(m, n, num_warps=4, variant="triton_v0_naive", row_strides=s),
+                      x, weight, eps)
 
 
 def rmsnorm_triton_v1_warps(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """v0 with ``num_warps`` scaled to the row: about 8 elements per thread."""
     _require_triton()
     _check_shapes(x, weight)
-    return _run_plain(plan_row, x, weight, eps)
+    return _run_plain(lambda m, n, s: plan_row(m, n, row_strides=s), x, weight, eps)
 
 
 def rmsnorm_triton_v2_looped(
@@ -345,7 +389,7 @@ def rmsnorm_triton_v2_looped(
     """Two passes over each row in ``block_n`` chunks; register use independent of N."""
     _require_triton()
     _check_shapes(x, weight)
-    return _run_plain(lambda m, n: plan_looped(m, n, block_n), x, weight, eps)
+    return _run_plain(lambda m, n, s: plan_looped(m, n, block_n, row_strides=s), x, weight, eps)
 
 
 def rmsnorm_triton_v3_multirow(
@@ -354,7 +398,7 @@ def rmsnorm_triton_v3_multirow(
     """Several rows per program; meant for short rows (N <= 1024 or so)."""
     _require_triton()
     _check_shapes(x, weight)
-    return _run_plain(lambda m, n: plan_multirow(m, n, block_m), x, weight, eps)
+    return _run_plain(lambda m, n, s: plan_multirow(m, n, block_m, row_strides=s), x, weight, eps)
 
 
 def rmsnorm_triton_v4_fused_residual(
@@ -374,8 +418,10 @@ def rmsnorm_triton_v4_fused_residual(
     s = torch.empty_like(x2)
     if m == 0:
         return y.view(x.shape), s.view(x.shape)
-    plan = plan_fused_residual(m, n)
-    _launch(plan, x2, r2, weight.contiguous(), y, s, x2.stride(0), r2.stride(0), y.stride(0), s.stride(0), n, eps)
+    strides = (x2.stride(0), r2.stride(0), y.stride(0), s.stride(0))
+    plan = plan_fused_residual(m, n, row_strides=strides)
+    a = plan.constexprs["ALIGN"]
+    _launch(plan, x2, r2, weight.contiguous(), y, s, *(st // a for st in strides), n // a, eps)
     return y.view(x.shape), s.view(x.shape)
 
 
@@ -390,4 +436,4 @@ def rmsnorm_triton(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> 
     """Pick a kernel by row length: multirow for short rows, looped for long ones."""
     _require_triton()
     _check_shapes(x, weight)
-    return _run_plain(lambda m, n: plan_for("triton", m, n), x, weight, eps)
+    return _run_plain(lambda m, n, s: plan_for("triton", m, n, row_strides=s), x, weight, eps)
