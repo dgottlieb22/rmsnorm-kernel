@@ -3,79 +3,95 @@ triton_v0_naive,_rmsnorm_row_kernel,4096,512,bf16,sm_80,True,4096,4,1,512,16,20,
 triton_v1_warps,_rmsnorm_row_kernel,4096,512,bf16,sm_80,True,4096,2,1,512,16,24,0,0,0,8,32,1.0,1.1851851851851851,warps+blocks,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,512,bf16,sm_80,True,4096,2,1,512,16,32,0,0,0,8,32,1.0,1.1851851851851851,registers+warps+blocks,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,512,bf16,sm_80,True,512,16,8,512,16,27,0,0,0,1024,4,1.0,1.1851851851851851,registers+warps,128:1 16:1,128:1,128:1 32:2,32:2 16:1,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,512,bf16,sm_80,True,512,16,8,512,16,30,0,0,0,64,4,1.0,1.1851851851851851,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,512,bf16,sm_80,True,4096,2,1,512,16,28,0,0,0,8,32,1.0,1.1851851851851851,registers+warps+blocks,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,1000,bf16,sm_80,True,4096,4,1,1024,8,26,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,1000,bf16,sm_80,True,4096,4,1,1024,8,26,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,1000,bf16,sm_80,True,4096,4,1,1024,8,32,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,1000,bf16,sm_80,True,1024,16,4,1024,8,28,0,0,0,2048,4,1.0,2.3703703703703702,registers+warps,128:1 32:1,128:1,128:1 32:2,32:3,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,1000,bf16,sm_80,True,1024,16,4,1024,8,29,0,0,0,64,4,1.0,2.3703703703703702,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,1000,bf16,sm_80,True,4096,4,1,1024,8,32,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,1024,bf16,sm_80,True,4096,4,1,1024,16,26,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,1024,bf16,sm_80,True,4096,4,1,1024,16,26,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,1024,bf16,sm_80,True,4096,4,1,1024,16,32,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,1024,bf16,sm_80,True,1024,16,4,1024,16,28,0,0,0,2048,4,1.0,2.3703703703703702,registers+warps,128:1 32:1,128:1,128:1 32:2,32:3,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,1024,bf16,sm_80,True,1024,16,4,1024,16,29,0,0,0,64,4,1.0,2.3703703703703702,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,1024,bf16,sm_80,True,4096,4,1,1024,16,32,0,0,0,16,16,1.0,2.3703703703703702,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,2048,bf16,sm_80,True,4096,4,1,2048,16,38,0,0,0,16,12,0.75,3.1604938271604937,registers,128:4,128:2,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,2048,bf16,sm_80,True,4096,8,1,2048,16,26,0,0,0,32,8,1.0,4.7407407407407405,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,2048,bf16,sm_80,True,4096,8,1,2048,16,32,0,0,0,32,8,1.0,4.7407407407407405,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,2048,bf16,sm_80,True,2048,16,2,2048,16,29,0,0,0,4096,4,1.0,4.7407407407407405,registers+warps,128:1 64:1,128:1,128:1 32:2,64:1 32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,2048,bf16,sm_80,True,2048,16,2,2048,16,28,0,0,0,64,4,1.0,4.7407407407407405,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,2048,bf16,sm_80,True,4096,8,1,2048,16,31,0,0,0,32,8,1.0,4.7407407407407405,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,4096,bf16,sm_80,True,4096,4,1,4096,16,62,0,0,0,16,8,0.5,4.7407407407407405,registers,128:8,128:4,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,4096,bf16,sm_80,True,4096,16,1,4096,16,26,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,4096,bf16,sm_80,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,4096,bf16,sm_80,True,4096,16,1,4096,16,28,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:2,128:1,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,4096,bf16,sm_80,True,4096,16,1,4096,16,28,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,4096,bf16,sm_80,True,4096,16,1,4096,16,31,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,5120,bf16,sm_80,True,4096,4,1,8192,16,127,0,0,0,16,4,0.25,9.481481481481481,registers,128:16,128:8,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,5120,bf16,sm_80,True,4096,16,1,8192,16,38,0,0,0,64,3,0.75,12.641975308641975,registers,128:4,128:2,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,5120,bf16,sm_80,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,5120,bf16,sm_80,True,4096,16,1,8192,16,38,0,0,0,64,3,0.75,12.641975308641975,registers,128:4,128:2,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,5120,bf16,sm_80,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,12.641975308641975,registers,128:4,128:2,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,5120,bf16,sm_80,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,12.641975308641975,registers,128:6,128:4,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,8192,bf16,sm_80,True,4096,4,1,8192,16,127,0,0,0,16,4,0.25,9.481481481481481,registers,128:16,128:8,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,8192,bf16,sm_80,True,4096,16,1,8192,16,38,0,0,0,64,3,0.75,12.641975308641975,registers,128:4,128:2,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,8192,bf16,sm_80,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,8192,bf16,sm_80,True,4096,16,1,8192,16,38,0,0,0,64,3,0.75,12.641975308641975,registers,128:4,128:2,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,8192,bf16,sm_80,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,12.641975308641975,registers,128:4,128:2,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,8192,bf16,sm_80,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,12.641975308641975,registers,128:6,128:4,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,16384,bf16,sm_80,True,4096,4,1,16384,16,218,0,0,0,16,2,0.125,18.962962962962962,registers,128:32,128:16,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,16384,bf16,sm_80,True,4096,16,1,16384,16,63,0,0,0,64,2,0.5,18.962962962962962,registers,128:8,128:4,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,16384,bf16,sm_80,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,9.481481481481481,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,16384,bf16,sm_80,True,4096,16,1,16384,16,63,0,0,0,64,2,0.5,18.962962962962962,registers,128:8,128:4,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,16384,bf16,sm_80,True,4096,16,1,16384,16,63,0,0,0,64,2,0.5,18.962962962962962,registers,128:8,128:4,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,16384,bf16,sm_80,True,4096,16,1,16384,16,64,0,0,0,64,2,0.5,18.962962962962962,registers,128:12,128:8,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,512,bf16,sm_90,True,4096,4,1,512,16,22,0,0,0,16,16,1.0,1.9393939393939394,warps,64:2,64:1,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,512,bf16,sm_90,True,4096,2,1,512,16,26,0,0,0,8,32,1.0,0.9696969696969697,registers+warps+blocks,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,512,bf16,sm_90,True,4096,2,1,512,16,32,0,0,0,8,32,1.0,0.9696969696969697,registers+warps+blocks,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,512,bf16,sm_90,True,512,16,8,512,16,27,0,0,0,1024,4,1.0,0.9696969696969697,registers+warps,128:1 16:1,128:1,128:1 32:2,32:2 16:1,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,512,bf16,sm_90,True,512,16,8,512,16,27,0,0,0,64,4,1.0,0.9696969696969697,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,512,bf16,sm_90,True,4096,2,1,512,16,28,0,0,0,8,32,1.0,0.9696969696969697,registers+warps+blocks,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,1000,bf16,sm_90,True,4096,4,1,1024,8,26,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,1000,bf16,sm_90,True,4096,4,1,1024,8,26,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,1000,bf16,sm_90,True,4096,4,1,1024,8,32,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,1000,bf16,sm_90,True,1024,16,4,1024,8,27,0,0,0,2048,4,1.0,1.9393939393939394,registers+warps,128:1 32:1,128:1,128:1 32:2,32:3,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,1000,bf16,sm_90,True,1024,16,4,1024,8,29,0,0,0,64,4,1.0,1.9393939393939394,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,1000,bf16,sm_90,True,4096,4,1,1024,8,32,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,1024,bf16,sm_90,True,4096,4,1,1024,16,26,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,1024,bf16,sm_90,True,4096,4,1,1024,16,26,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,1024,bf16,sm_90,True,4096,4,1,1024,16,32,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,1024,bf16,sm_90,True,1024,16,4,1024,16,27,0,0,0,2048,4,1.0,1.9393939393939394,registers+warps,128:1 32:1,128:1,128:1 32:2,32:3,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,1024,bf16,sm_90,True,1024,16,4,1024,16,29,0,0,0,64,4,1.0,1.9393939393939394,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,1024,bf16,sm_90,True,4096,4,1,1024,16,32,0,0,0,16,16,1.0,1.9393939393939394,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,2048,bf16,sm_90,True,4096,4,1,2048,16,38,0,0,0,16,12,0.75,2.585858585858586,registers,128:4,128:2,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,2048,bf16,sm_90,True,4096,8,1,2048,16,26,0,0,0,32,8,1.0,3.878787878787879,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,2048,bf16,sm_90,True,4096,8,1,2048,16,32,0,0,0,32,8,1.0,3.878787878787879,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,2048,bf16,sm_90,True,2048,16,2,2048,16,28,0,0,0,4096,4,1.0,3.878787878787879,registers+warps,128:1 64:1,128:1,128:1 32:2,64:1 32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,2048,bf16,sm_90,True,2048,16,2,2048,16,30,0,0,0,64,4,1.0,3.878787878787879,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,2048,bf16,sm_90,True,4096,8,1,2048,16,30,0,0,0,32,8,1.0,3.878787878787879,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,4096,bf16,sm_90,True,4096,4,1,4096,16,60,0,0,0,16,8,0.5,3.878787878787879,registers,128:8,128:4,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,4096,bf16,sm_90,True,4096,16,1,4096,16,26,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,4096,bf16,sm_90,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,4096,bf16,sm_90,True,4096,16,1,4096,16,28,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:2,128:1,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,4096,bf16,sm_90,True,4096,16,1,4096,16,28,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:2,128:1,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,4096,bf16,sm_90,True,4096,16,1,4096,16,30,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:3,128:2,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,5120,bf16,sm_90,True,4096,4,1,8192,16,127,0,0,0,16,4,0.25,7.757575757575758,registers,128:16,128:8,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,5120,bf16,sm_90,True,4096,16,1,8192,16,39,0,0,0,64,3,0.75,10.343434343434344,registers,128:4,128:2,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,5120,bf16,sm_90,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,5120,bf16,sm_90,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,10.343434343434344,registers,128:4,128:2,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,5120,bf16,sm_90,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,10.343434343434344,registers,128:4,128:2,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,5120,bf16,sm_90,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,10.343434343434344,registers,128:6,128:4,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,8192,bf16,sm_90,True,4096,4,1,8192,16,127,0,0,0,16,4,0.25,7.757575757575758,registers,128:16,128:8,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,8192,bf16,sm_90,True,4096,16,1,8192,16,39,0,0,0,64,3,0.75,10.343434343434344,registers,128:4,128:2,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,8192,bf16,sm_90,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,8192,bf16,sm_90,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,10.343434343434344,registers,128:4,128:2,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,8192,bf16,sm_90,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,10.343434343434344,registers,128:4,128:2,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,8192,bf16,sm_90,True,4096,16,1,8192,16,40,0,0,0,64,3,0.75,10.343434343434344,registers,128:6,128:4,32:2,32:2,0
 triton_v0_naive,_rmsnorm_row_kernel,4096,16384,bf16,sm_90,True,4096,4,1,16384,16,216,0,0,0,16,2,0.125,15.515151515151516,registers,128:32,128:16,32:2,32:2,0
 triton_v1_warps,_rmsnorm_row_kernel,4096,16384,bf16,sm_90,True,4096,16,1,16384,16,63,0,0,0,64,2,0.5,15.515151515151516,registers,128:8,128:4,32:2,32:2,0
 triton_v2_looped,_rmsnorm_looped_kernel,4096,16384,bf16,sm_90,True,4096,16,1,4096,16,32,0,0,0,64,4,1.0,7.757575757575758,registers+warps,128:3,128:1,32:2,32:2,0
 triton_v3_multirow,_rmsnorm_multirow_kernel,4096,16384,bf16,sm_90,True,4096,16,1,16384,16,64,0,0,0,64,2,0.5,15.515151515151516,registers,128:8,128:4,32:2,32:2,1
+triton_v3b_wtile,_rmsnorm_multirow_wtile_kernel,4096,16384,bf16,sm_90,True,4096,16,1,16384,16,64,0,0,0,64,2,0.5,15.515151515151516,registers,128:8,128:4,32:2,32:2,0
 triton_v4_fused_residual,_rmsnorm_fused_residual_kernel,4096,16384,bf16,sm_90,True,4096,16,1,16384,16,64,0,0,0,64,2,0.5,15.515151515151516,registers,128:12,128:8,32:2,32:2,0

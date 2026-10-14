@@ -41,7 +41,7 @@ def _run_aot(tmp_path: Path, *args: str) -> dict:
 def hinted(tmp_path_factory):
     return _run_aot(tmp_path_factory.mktemp("aot"),
                     "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--impl", "triton_v2_looped",
-                    "--impl", "triton_v3_multirow",
+                    "--impl", "triton_v3_multirow", "--impl", "triton_v3b_wtile",
                     "--n", "512", "--n", "1000", "--n", "1024", "--n", "4096", "--n", "8192", "--n", "16384")
 
 
@@ -145,3 +145,18 @@ def test_multirow_restages_weight_vector_through_shared_memory(hinted):
     assert int(one["block_m"]) == 1 and int(one["layout_converts"]) == 1
     assert (one["shared_bytes"], one["shared_loads"], one["shared_stores"], one["global_loads"]) == \
            (v1["shared_bytes"], v1["shared_loads"], v1["shared_stores"], v1["global_loads"])
+
+
+def test_weight_tile_variant_needs_no_layout_conversion(hinted):
+    """v3b loads the weight as a [BLOCK_M, BLOCK_N] tile: two 128-bit loads per thread, no
+    ttg.convert_layout, the row kernels' shared memory (one float per warp), registers within
+    3 of v3 (diary H14b). N = 1000 (ALIGN 8) gets the same code as 1024."""
+    for n in (512, 1000, 1024):
+        b = hinted[("triton_v3b_wtile", n, True)]
+        v3 = hinted[("triton_v3_multirow", n, True)]
+        assert (b["block_m"], b["block_n"], b["num_warps"]) == (v3["block_m"], v3["block_n"], v3["num_warps"])
+        assert int(b["block_m"]) > 1
+        assert (b["global_loads"], b["global_stores"]) == ("128:2", "128:1")
+        assert int(b["layout_converts"]) == 0 and int(b["shared_bytes"]) == 4 * int(b["num_warps"])
+        assert (b["shared_loads"], b["shared_stores"]) == ("32:2", "32:2")
+        assert abs(int(b["registers"]) - int(v3["registers"])) <= 3 and int(b["spill_stores"]) == 0

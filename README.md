@@ -120,6 +120,11 @@ performance to one change in code.
   per thread at N = 512) and the compiler moves it through shared memory
   into the tile's layout, with two extra barriers; diary H14 traces that in
   the IR and H14b compiles the alternatives.
+- `triton_v3b_wtile`: v3 with the weight read as a `[BLOCK_M, BLOCK_N]` tile
+  (row stride 0), so it arrives in the x tile's layout: no shared-memory
+  layout change, two fewer barriers, BLOCK_M times the weight-load requests
+  from L1. Same arithmetic as v3, bit-identical output; which is faster is
+  H6c.
 - `triton_v4_fused_residual`: the residual add inside the row kernel, writing
   both the normalized output and the new residual stream. The sum is rounded
   to the storage dtype before it is normalized so the result matches the
@@ -216,14 +221,14 @@ off the assembler (`python -m rmsnorm.cli aot`, module `rmsnorm/aot_stats.py`).
 These are facts about the generated code, not timings. sm_80 (A100), bf16,
 M = 4096; the full table for sm_80 and sm_90 is `docs/results/aot_stats_bf16.md`.
 
-| N | v0 naive (4 warps) | v1 warps | v2 looped (4096 chunks) | v3 multirow |
-|---|---|---|---|---|
-| 512 | 20 regs, 100% occ, 64-bit accesses | 2 warps, 24 regs, 100%, 128-bit | 32 regs, 100% | 8x512 block, 16 warps, 27 regs, 100%, grid 512 |
-| 1000 | 26 regs, 100%, 128-bit (ALIGN 8) | 4 warps, 26 regs, 100% | 32 regs, 100% | 4x1024, 28 regs, 100% |
-| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 29 regs, 100% |
-| 4096 | 62 regs, 50% | 16 warps, 26 regs, 100% | 32 regs, 100% | 1x4096, 28 regs, 100% |
-| 5120 / 8192 | 127 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% |
-| 16384 | 218 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% |
+| N | v0 naive (4 warps) | v1 warps | v2 looped (4096 chunks) | v3 multirow | v3b wtile |
+|---|---|---|---|---|---|
+| 512 | 20 regs, 100% occ, 64-bit accesses | 2 warps, 24 regs, 100%, 128-bit | 32 regs, 100% | 8x512 block, 16 warps, 27 regs, 100%, grid 512, 1 KB smem | 30 regs, 100%, 64 B smem |
+| 1000 | 26 regs, 100%, 128-bit (ALIGN 8) | 4 warps, 26 regs, 100% | 32 regs, 100% | 4x1024, 28 regs, 100%, 2 KB smem | 29 regs, 100%, 64 B |
+| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 29 regs, 100%, 4 KB smem | 28 regs, 100%, 64 B |
+| 4096 | 62 regs, 50% | 16 warps, 26 regs, 100% | 32 regs, 100% | 1x4096, 28 regs, 100% | same as v3 |
+| 5120 / 8192 | 127 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% | 40 regs, 75% |
+| 16384 | 218 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% | same as v3 |
 
 Every access in this table is a 128-bit vector per thread except where
 marked. No variant spills at any shape in the matrix. Five things this

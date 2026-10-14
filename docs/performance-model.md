@@ -123,6 +123,7 @@ program, one weight load per BLOCK_M rows.
 | triton_v1_warps | N in [2048, 8192] | N = 512 (still one row per program) | 8 elements per thread: one 16 B load each, room for occupancy |
 | triton_v2_looped | N >= 8192 | N <= 4096 (two passes and loop overhead for no benefit) | bounded registers; second pass re-reads from L2 |
 | triton_v3_multirow | N <= 1024 | large N (fewer programs, bigger blocks) | amortizes weight load and per-program overhead |
+| triton_v3b_wtile | N <= 1024, by a few percent over v3 if its two extra barriers cost more than BLOCK_M re-reads of the weight from L1 | nowhere distinct from v3; identical code at BLOCK_M = 1 | same tile as v3, weight read in the tile's layout: no shared-memory layout change (diary H14, H14b) |
 | triton (dispatch) | all N, by construction | M = 1 vs the best single kernel (dispatch costs host time) | chooses by N |
 | triton_v4_fused_residual | all shapes vs the unfused pair | vs vLLM's CUDA kernel: unknown | 20% fewer bytes, one launch instead of two or more |
 

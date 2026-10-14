@@ -175,6 +175,18 @@ def test_rejects_mismatched_weight(impl, device):
         impl.fn(x, torch.ones(8, device=device), 1e-6)
 
 
+@pytest.mark.skipif(not rmsnorm.triton_impls.HAS_TRITON, reason="triton not installed")
+@pytest.mark.parametrize("m,n", [(37, 512), (37, 1000), (8, 1024), (3, 2048), (37, 4096)])
+def test_weight_tile_variant_is_bit_identical_to_multirow(m, n, device):
+    """v3b changes only how the weight reaches the registers (a tile load instead of a 1-D
+    load plus a shared-memory layout change, diary H14b); the arithmetic is the same, so the
+    outputs match bit for bit, tail rows and masked columns included."""
+    x, w, eps = make_inputs(m, n, torch.bfloat16, device, seed=6)
+    v3 = rmsnorm.IMPLEMENTATIONS["triton_v3_multirow"].fn(x, w, eps)
+    v3b = rmsnorm.IMPLEMENTATIONS["triton_v3b_wtile"].fn(x, w, eps)
+    assert torch.equal(v3, v3b)
+
+
 # --------------------------------------------------------------------------
 # Residual-add + RMSNorm
 # --------------------------------------------------------------------------

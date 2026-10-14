@@ -227,7 +227,7 @@ def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, speci
 
 
 DEFAULT_VARIANTS = ["triton_v0_naive", "triton_v1_warps", "triton_v2_looped", "triton_v3_multirow",
-                    "triton_v4_fused_residual"]
+                    "triton_v3b_wtile", "triton_v4_fused_residual"]
 DEFAULT_NS = [512, 1024, 2048, 4096, 5120, 8192, 16384]
 
 

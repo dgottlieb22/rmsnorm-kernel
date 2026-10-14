@@ -3,10 +3,11 @@
 Files here are the ones the README and diary cite. Each says how it was
 produced.
 
-- `aot_stats_bf16.csv` / `.md`: compile-time resources per variant and shape
-  for sm_80 and sm_90, bf16, M = 4096, N in {512, 1000, 1024, 2048, 4096,
-  5120, 8192, 16384}, with the launcher's alignment hints and the kernels'
-  ALIGN rescaling. Produced on a machine without a GPU by
+- `aot_stats_bf16.csv` / `.md`: compile-time resources per variant (v0, v1,
+  v2, v3, v3b, v4) and shape for sm_80 and sm_90, bf16, M = 4096, N in
+  {512, 1000, 1024, 2048, 4096, 5120, 8192, 16384}, with the launcher's
+  alignment hints and the kernels' ALIGN rescaling. Produced on a machine
+  without a GPU by
   `python -m rmsnorm.cli aot --n 512 --n 1000 --n 1024 --n 2048 --n 4096 --n 5120 --n 8192 --n 16384 --out docs/results/aot_stats_bf16.csv`
   (Triton 3.4.0, bundled ptxas). Registers and spill bytes are ptxas output;
   global and shared-memory load/store widths are counted in the PTX;

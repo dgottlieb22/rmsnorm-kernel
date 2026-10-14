@@ -6,9 +6,11 @@ compiler then moves the vector through shared memory into the layout of the
 [BLOCK_M, BLOCK_N] x tile before the multiply (diary H14). This script compiles
 two alternatives for the same launch plans and prints what changed:
 
-(a) ``w`` as a [1, BLOCK_N] tensor, broadcast against the tile;
+(a) ``w`` as a [1, BLOCK_N] tensor, broadcast against the tile (kept here only;
+    it did not help, see the diary's failed experiments);
 (b) ``w`` as a full [BLOCK_M, BLOCK_N] tile, every row of the block reading the
-    same BLOCK_N weights.
+    same BLOCK_N weights. This one shipped as ``triton_v3b_wtile`` and is
+    compiled from the registry.
 
 Usage, from the repository root with TRITON_INTERPRET unset::
 
@@ -47,28 +49,6 @@ def _w_as_1xn_kernel(x_ptr, w_ptr, y_ptr, stride_xm_div, stride_ym_div, M, N_div
     tl.store(y_ptr + rows[:, None] * stride_ym + cols[None, :], y.to(y_ptr.dtype.element_ty), mask=mask)
 
 
-@triton.jit
-def _w_as_tile_kernel(x_ptr, w_ptr, y_ptr, stride_xm_div, stride_ym_div, M, N_div, eps,
-                      BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, ALIGN: tl.constexpr):
-    """(b): the weight is loaded as a [BLOCK_M, BLOCK_N] tile; every row reads the same addresses."""
-    stride_xm = stride_xm_div * ALIGN
-    stride_ym = stride_ym_div * ALIGN
-    N = N_div * ALIGN
-    pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
-    cols = tl.arange(0, BLOCK_N)
-    row_mask = rows < M
-    col_mask = cols < N
-    mask = row_mask[:, None] & col_mask[None, :]
-    x = tl.load(x_ptr + rows[:, None] * stride_xm + cols[None, :], mask=mask, other=0.0).to(tl.float32)
-    zero_rows = tl.zeros([BLOCK_M], dtype=tl.int32)
-    w = tl.load(w_ptr + zero_rows[:, None] + cols[None, :], mask=mask, other=0.0).to(tl.float32)
-    mean_sq = tl.sum(x * x, axis=1) / N
-    rstd = tl.rsqrt(mean_sq + eps)
-    y = x * rstd[:, None] * w
-    tl.store(y_ptr + rows[:, None] * stride_ym + cols[None, :], y.to(y_ptr.dtype.element_ty), mask=mask)
-
-
 def describe(label: str, plan: LaunchPlan, n: int, arch: str, show_ir: bool) -> None:
     compiled = compile_plan(plan, torch.bfloat16, 4096, n, arch)
     ptx, ttgir = compiled.asm["ptx"], compiled.asm["ttgir"]
@@ -97,11 +77,10 @@ def main() -> int:
     for n in args.n or (512, 1024, 2048, 4096):
         base = plan_for("triton_v3_multirow", 4096, n)
         print(f"N={n} block={base.block_m}x{base.block_n} warps={base.num_warps} ({args.arch}, bf16)")
-        describe("shipped", base, n, args.arch, args.ir)
+        describe("v3", base, n, args.arch, args.ir)
         describe("(a) 1xN", LaunchPlan("probe", "", base.constexprs, base.num_warps, base.grid,
                                        kernel_fn=_w_as_1xn_kernel), n, args.arch, args.ir)
-        describe("(b) tile", LaunchPlan("probe", "", base.constexprs, base.num_warps, base.grid,
-                                        kernel_fn=_w_as_tile_kernel), n, args.arch, args.ir)
+        describe("(b) v3b", plan_for("triton_v3b_wtile", 4096, n), n, args.arch, args.ir)
     return 0
 
 

@@ -209,12 +209,21 @@ Sub-experiment H6b ("what changed when you altered the tile size"): BLOCK_M in
 program covers ~4-8 KB and a decline when BLOCK_M x BLOCK_N exceeds what the
 threads can hold in registers (tile too tall: spills again).
 
+Sub-experiment H6c (added after H14b): `triton_v3b_wtile` against v3 at the
+same shapes. v3b reads the weight as a tile and skips v3's shared-memory
+layout change and two barriers, at BLOCK_M times the weight-load requests
+from L1 (H14b). Expect the difference to be a few percent at most, in v3b's
+favor if the barriers cost more than the L1 re-reads; the ncu comparison to
+read is L1 request count and `barrier` stall reasons.
+
 Change: 2-D block, reduction along axis 1.
 
 Measurement:
 ```
-python -m rmsnorm.cli bench --shape 64x512 --shape 4096x512 --shape 16384x512 --shape 4096x1024 --shape 4096x2048 --impl triton_v1_warps --impl triton_v3_multirow
-python -m rmsnorm.cli stats --shape 4096x512 --impl triton_v1_warps --impl triton_v3_multirow
+python -m rmsnorm.cli bench --shape 64x512 --shape 4096x512 --shape 16384x512 --shape 4096x1024 --shape 4096x2048 --impl triton_v1_warps --impl triton_v3_multirow --impl triton_v3b_wtile
+python -m rmsnorm.cli stats --shape 4096x512 --impl triton_v1_warps --impl triton_v3_multirow --impl triton_v3b_wtile
+scripts/ncu.sh triton_v3_multirow 4096x512
+scripts/ncu.sh triton_v3b_wtile 4096x512
 ```
 For H6b, call `rmsnorm_triton_v3_multirow(x, w, eps, block_m=...)` directly.
 
@@ -548,9 +557,13 @@ one global load, one shared store, one shared load and two barriers; it
 costs (b) one global load. Whether seven extra L1 hits per weight line cost
 more than a shared round trip and two barriers is a timing question.
 
-Result (timing): PENDING HARDWARE. (b) is a candidate variant, not a change
-to v3: the shipped kernel is the one the design text describes, and the two
-should be timed side by side in H6 before either is dropped.
+Result (timing): PENDING HARDWARE. (b) shipped as `triton_v3b_wtile`
+(`_rmsnorm_multirow_wtile_kernel`, same plan as v3 with a different kernel),
+so H6 can time the two side by side; the probe script now compiles (b) from
+the registry. The dispatcher still picks v3 for N <= 1024 until the timing
+says otherwise. `tests/test_correctness.py` pins that v3 and v3b agree bit
+for bit (tail rows and masked columns included) and `tests/test_aot_stats.py`
+pins the compile-time facts above, N = 1000 (ALIGN 8) included.
 
 ---
 
@@ -559,10 +572,6 @@ should be timed side by side in H6 before either is dropped.
 - `triton.autotune` over `num_warps` and `BLOCK_M`, to check whether the
   heuristics in `_warps_for` and `_rows_per_program` leave anything on the
   table, and what autotuning costs at first call per shape.
-- A multirow variant that loads the weight as a [BLOCK_M, BLOCK_N] tile
-  (H14b (b)): no shared-memory conversion and two fewer barriers per program,
-  BLOCK_M times the weight-load requests from L1. Time it against the shipped
-  v3 in H6 at 4096 x 512 and 16384 x 512; the compile-time facts are in H14b.
 - A CUDA kernel with warp-shuffle reductions and 16-byte vector loads. Built
   only if the Triton kernels sit more than ~10% below copy BW in the
   bandwidth-bound regime after H3-H7; the point would be to see what Triton's

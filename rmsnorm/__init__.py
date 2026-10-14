@@ -45,6 +45,8 @@ IMPLEMENTATIONS: Dict[str, Impl] = {
              "two passes over the row in fixed chunks; bounded registers"),
         Impl("triton_v3_multirow", triton_impls.rmsnorm_triton_v3_multirow, "triton",
              "several rows per program; weight loaded once per program"),
+        Impl("triton_v3b_wtile", triton_impls.rmsnorm_triton_v3b_wtile, "triton",
+             "v3 with the weight read as a tile: no shared-memory layout change"),
         Impl("triton", triton_impls.rmsnorm_triton, "triton",
              "dispatcher: picks a variant by row length"),
     ]

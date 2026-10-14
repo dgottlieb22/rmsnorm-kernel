@@ -15,6 +15,9 @@ variants, in the order they were written:
 * ``v3_multirow``: several short rows per program as a 2-D block, so the
   weight is loaded once per program and every thread has more independent
   loads in flight.
+* ``v3b_wtile``: v3 with the weight read as a [BLOCK_M, BLOCK_N] tile, so it
+  arrives in the x tile's layout and skips the shared-memory layout change the
+  1-D load needs (diary H14, H14b).
 * ``v4_fused_residual``: residual add fused into the single-row kernel; also
   writes the updated residual stream.
 * ``rmsnorm_triton``: the dispatcher that picks a variant by row length.
@@ -200,6 +203,42 @@ if HAS_TRITON:
         tl.store(y_ptrs, y.to(y_ptr.dtype.element_ty), mask=mask)
 
     @triton.jit
+    def _rmsnorm_multirow_wtile_kernel(
+        x_ptr, w_ptr, y_ptr,
+        stride_xm_div, stride_ym_div,
+        M, N_div, eps,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, ALIGN: tl.constexpr,
+    ):
+        """The multirow kernel with the weight loaded as a [BLOCK_M, BLOCK_N] tile.
+
+        Every row of the block reads the same BLOCK_N weights (row stride 0),
+        so the load comes out in the x tile's layout and needs no shared-memory
+        layout change: the 1-D weight load of ``_rmsnorm_multirow_kernel``
+        costs a store, a load and two barriers per program to re-stage (diary
+        H14). The price is BLOCK_M times the weight-load requests per program,
+        all but the first touch of each line an L1 hit (diary H14b).
+        """
+        stride_xm = stride_xm_div * ALIGN
+        stride_ym = stride_ym_div * ALIGN
+        N = N_div * ALIGN
+        pid = tl.program_id(0).to(tl.int64)
+        rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = tl.arange(0, BLOCK_N)
+        row_mask = rows < M
+        col_mask = cols < N
+        mask = row_mask[:, None] & col_mask[None, :]
+        x_ptrs = x_ptr + rows[:, None] * stride_xm + cols[None, :]
+        x = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
+        zero_rows = tl.zeros([BLOCK_M], dtype=tl.int32)
+        w_ptrs = w_ptr + zero_rows[:, None] + cols[None, :]
+        w = tl.load(w_ptrs, mask=mask, other=0.0).to(tl.float32)
+        mean_sq = tl.sum(x * x, axis=1) / N
+        rstd = tl.rsqrt(mean_sq + eps)
+        y = x * rstd[:, None] * w
+        y_ptrs = y_ptr + rows[:, None] * stride_ym + cols[None, :]
+        tl.store(y_ptrs, y.to(y_ptr.dtype.element_ty), mask=mask)
+
+    @triton.jit
     def _rmsnorm_fused_residual_kernel(
         x_ptr, r_ptr, w_ptr, y_ptr, s_ptr,
         stride_xm_div, stride_rm_div, stride_ym_div, stride_sm_div,
@@ -261,8 +300,9 @@ class LaunchPlan:
         return self.constexprs.get("BLOCK_M", 1)
 
 
-# Chunk width for the looped kernel. 4096 float32 accumulators over 8 warps is
-# 16 per thread, which leaves room for the loaded chunk and the weight chunk.
+# Chunk width for the looped kernel. A 4096-wide chunk gets 16 warps from
+# ``_warps_for``, so each thread holds 8 float32 accumulators plus the loaded
+# chunk and the weight chunk: 32 registers at every N (diary H13).
 LOOPED_BLOCK_N = 4096
 
 
@@ -305,15 +345,17 @@ def plan_looped(m: int, n: int, block_n: int = LOOPED_BLOCK_N, row_strides: tupl
                       _warps_for(block_n), m)
 
 
-def plan_multirow(m: int, n: int, block_m: int | None = None, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
+def plan_multirow(m: int, n: int, block_m: int | None = None, row_strides: tuple[int, ...] = (),
+                  weight_tile: bool = False) -> LaunchPlan:
     block_n = triton.next_power_of_2(n)
     if block_m is None:
         block_m = _rows_per_program(block_n)
     if block_m & (block_m - 1):
         raise ValueError(f"block_m must be a power of two, got {block_m}")
     align = alignment(n, *(row_strides or (n,)))
-    return LaunchPlan("triton_v3_multirow", "_rmsnorm_multirow_kernel",
-                      {"BLOCK_M": block_m, "BLOCK_N": block_n, "ALIGN": align},
+    variant, kernel = (("triton_v3b_wtile", "_rmsnorm_multirow_wtile_kernel") if weight_tile
+                       else ("triton_v3_multirow", "_rmsnorm_multirow_kernel"))
+    return LaunchPlan(variant, kernel, {"BLOCK_M": block_m, "BLOCK_N": block_n, "ALIGN": align},
                       _warps_for(block_m * block_n), triton.cdiv(m, block_m))
 
 
@@ -336,6 +378,8 @@ def plan_for(variant: str, m: int, n: int, row_strides: tuple[int, ...] = ()) ->
         return plan_looped(m, n, row_strides=row_strides)
     if variant == "triton_v3_multirow":
         return plan_multirow(m, n, row_strides=row_strides)
+    if variant == "triton_v3b_wtile":
+        return plan_multirow(m, n, row_strides=row_strides, weight_tile=True)
     if variant == "triton_v4_fused_residual":
         return plan_fused_residual(m, n, row_strides=row_strides)
     if variant == "triton":
@@ -361,7 +405,7 @@ def _run_plain(plan_fn, x: torch.Tensor, weight: torch.Tensor, eps: float) -> to
         return y.view(x.shape)
     plan = plan_fn(m, n, (x2.stride(0), y.stride(0)))
     a = plan.constexprs["ALIGN"]
-    if plan.kernel_name == "_rmsnorm_multirow_kernel":
+    if "BLOCK_M" in plan.constexprs:  # the 2-D kernels also take M for the row mask
         args = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a, m, n // a, eps)
     else:
         args = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a, n // a, eps)
@@ -400,6 +444,16 @@ def rmsnorm_triton_v3_multirow(
     _require_triton()
     _check_shapes(x, weight)
     return _run_plain(lambda m, n, s: plan_multirow(m, n, block_m, row_strides=s), x, weight, eps)
+
+
+def rmsnorm_triton_v3b_wtile(
+    x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6, block_m: int | None = None
+) -> torch.Tensor:
+    """v3 with the weight read as a [BLOCK_M, BLOCK_N] tile instead of a 1-D vector (diary H14b)."""
+    _require_triton()
+    _check_shapes(x, weight)
+    return _run_plain(lambda m, n, s: plan_multirow(m, n, block_m, row_strides=s, weight_tile=True),
+                      x, weight, eps)
 
 
 def rmsnorm_triton_v4_fused_residual(
