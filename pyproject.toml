@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rmsnorm-kernels"
+version = "0.1.0"
+description = "RMSNorm for transformer inference: from a PyTorch baseline to optimized Triton kernels, with the why behind every step."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# torch 2.4 is the first release with torch.nn.functional.rms_norm, one of the
+# baselines. triton is imported lazily, so the PyTorch paths work without it.
+dependencies = [
+    "torch>=2.4",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+triton = ["triton>=3.0"]
+plots = ["matplotlib>=3.7"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+rmsnorm-bench = "rmsnorm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rmsnorm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
+markers = [
+    "gpu: needs a CUDA device (skipped elsewhere)",
+    "slow: long-running (interpreter-mode Triton over large rows, torch.compile)",
+]
+filterwarnings = [
+    # Triton's interpreter converts 0-d arrays to scalars; not ours to fix.
+    "ignore:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning",
+    "ignore:networkx backend defined more than once:RuntimeWarning",
+    # Inductor probing for Python.h on a host without the headers.
+    "ignore:Can't find Python.h:UserWarning",
+]

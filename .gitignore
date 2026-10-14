@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Raw benchmark and profiler output is machine-specific and large. Curated
+# copies that the README cites live under docs/results/.
+/results/
+!docs/results/
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# Triton / inductor caches
+.triton/
+torchinductor_*/
+
+# Editor
+.vscode/
+.idea/
+*.swp
