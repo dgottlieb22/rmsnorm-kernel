@@ -18,7 +18,7 @@ from .reference import rmsnorm_reference, rmsnorm_residual_reference
 class Impl:
     name: str
     fn: Callable
-    family: str  # "torch" | "compile" | "triton"
+    family: str  # "torch" | "compile" | "triton" | "vendor"
     description: str
 
     @property
@@ -61,6 +61,20 @@ RESIDUAL_IMPLEMENTATIONS: Dict[str, Impl] = {
              "residual add fused into the row kernel; writes both outputs"),
     ]
 }
+
+
+def _register_external() -> None:
+    """Add vendor implementations (vLLM, Liger, flash-attn) when their packages import."""
+    from . import external
+
+    plain, residual = external.discover()
+    for name, fn, desc in plain.values():
+        IMPLEMENTATIONS[name] = Impl(name, fn, "vendor", desc)
+    for name, fn, desc in residual.values():
+        RESIDUAL_IMPLEMENTATIONS[name] = Impl(name, fn, "vendor", desc)
+
+
+_register_external()
 
 __all__ = [
     "IMPLEMENTATIONS",
