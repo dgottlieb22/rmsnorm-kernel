@@ -116,7 +116,10 @@ performance to one change in code.
   second pass re-reads the row from L2.
 - `triton_v3_multirow`: several short rows per program as a 2-D block; the
   weight is loaded once per program and every thread has more independent
-  loads in flight.
+  loads in flight. The once-per-program weight load is narrow (one element
+  per thread at N = 512) and the compiler moves it through shared memory
+  into the tile's layout, with two extra barriers; diary H14 traces that in
+  the IR and H14b compiles the alternatives.
 - `triton_v4_fused_residual`: the residual add inside the row kernel, writing
   both the normalized output and the new residual stream. The sum is rounded
   to the storage dtype before it is normalized so the result matches the
@@ -223,8 +226,8 @@ M = 4096; the full table for sm_80 and sm_90 is `docs/results/aot_stats_bf16.md`
 | 16384 | 218 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% |
 
 Every access in this table is a 128-bit vector per thread except where
-marked. No variant spills at any shape in the matrix. Four things this
-already settles (diary H3, H4, H12, H13):
+marked. No variant spills at any shape in the matrix. Five things this
+already settles (diary H3, H4, H12, H13, H14):
 
 - The naive kernel's problem on long rows is register-capped occupancy, not
   spilling: 218 registers per thread at N = 16384 leaves room for 2 programs
@@ -250,6 +253,16 @@ already settles (diary H3, H4, H12, H13):
   owns only 4 elements; `v1` drops to 2 warps there so every thread owns 8
   and the accesses are 128-bit. Whether that matters at 1 KB per row is a
   timing question.
+- The multirow kernel's 1 to 4 KB of shared memory is the weight vector. Its
+  1-D load is spread one element per thread across all 512 threads (a
+  16-bit load at N = 512), and the compiler moves it through shared memory
+  (2 bytes x N) into the 2-D tile's layout: one extra store and load per
+  thread and two extra barriers per program, read off the TTGIR and PTX
+  (diary H14). Loading the weight as a [1, N] block does not remove the
+  conversion and doubles the shared memory; loading it as a full
+  [BLOCK_M, N] tile removes it at the cost of BLOCK_M times the weight-load
+  requests from L1 (H14b). Which is faster is a timing question, so the
+  tile load is a candidate variant, not a change to v3.
 
 ### Pending hardware: timing and profiles
 
@@ -279,9 +292,10 @@ tool already produces data here:
 - `python -m rmsnorm.cli aot --arch sm_80 --arch sm_90`: compiles every
   variant offline for the target SM with the launcher's specialization,
   runs the bundled `ptxas -v`, and reports registers, spill bytes, shared
-  memory, programs per SM, theoretical occupancy with its limiter, and waves.
-  `--no-specialize` shows the kernel a misaligned input gets. Results in
-  section 5.
+  memory, programs per SM, theoretical occupancy with its limiter, waves,
+  and the global and shared-memory accesses in the PTX by width.
+  `--no-specialize` shows the kernel a misaligned input gets; `--dump-ir DIR`
+  keeps each compile's TTGIR and PTX for reading. Results in section 5.
 - `python -m rmsnorm.cli kernels --impl torch_eager --shape 4096x4096`:
   CUDA kernels launched per call with their device time (`torch.profiler`).
   For the baseline this is the count of separate kernels and the difference

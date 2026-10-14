@@ -1,9 +1,9 @@
 """Compile-time resource facts from offline compilation (no GPU needed).
 
-These pin what ``docs/diary.md`` H3 and H4 cite: numbers read from ptxas on
-the PTX Triton 3.4.0 emits for sm_80. They are facts about this compiler
-version, so a Triton upgrade that changes code generation fails here on
-purpose; the diary then needs a new look, not a looser test.
+These pin what ``docs/diary.md`` H3, H4, H12 and H14 cite: numbers read from
+ptxas and the PTX Triton 3.4.0 emits for sm_80. They are facts about this
+compiler version, so a Triton upgrade that changes code generation fails here
+on purpose; the diary then needs a new look, not a looser test.
 
 The test session enables Triton's interpreter for the runtime tests, and
 that patch cannot be undone in-process, so the compiler runs in a clean
@@ -118,3 +118,30 @@ def test_multirow_block_covers_eight_short_rows(hinted):
     s = hinted[("triton_v3_multirow", 512, True)]
     assert (int(s["block_m"]), int(s["block_n"]), int(s["num_warps"])) == (8, 512, 16)
     assert int(s["grid"]) == 4096 // 8 and float(s["occupancy"]) == 1.0
+
+
+def test_row_kernels_share_one_float_per_warp(hinted):
+    """The single-row kernels' only shared memory is the cross-warp reduction: 4 bytes per warp,
+    written and read as 32-bit words. Anything wider is a layout conversion (diary H14)."""
+    for n in (512, 1024, 4096, 16384):
+        s = hinted[("triton_v1_warps", n, True)]
+        assert int(s["shared_bytes"]) == 4 * int(s["num_warps"])
+        assert (s["shared_loads"], s["shared_stores"]) == ("32:2", "32:2")
+
+
+def test_multirow_restages_weight_vector_through_shared_memory(hinted):
+    """With BLOCK_M > 1 the weight is loaded one element per thread and moved through shared
+    memory into the tile's column layout: 2 bytes x N of shared memory, a 16-bit store and a
+    128-bit load per thread, one ttg.convert_layout (diary H14)."""
+    s = hinted[("triton_v3_multirow", 512, True)]
+    assert int(s["shared_bytes"]) == 2 * 512
+    assert s["global_loads"] == "128:1 16:1" and int(s["layout_converts"]) == 1
+    assert "16:1" in s["shared_stores"].split() and "128:1" in s["shared_loads"].split()
+    assert int(hinted[("triton_v3_multirow", 1024, True)]["shared_bytes"]) == 2 * 1024
+    # At BLOCK_M = 1 the load layout already matches the tile's; the op stays in the TTGIR but
+    # lowers to nothing, and the kernel compiles like v1.
+    one = hinted[("triton_v3_multirow", 4096, True)]
+    v1 = hinted[("triton_v1_warps", 4096, True)]
+    assert int(one["block_m"]) == 1 and int(one["layout_converts"]) == 1
+    assert (one["shared_bytes"], one["shared_loads"], one["shared_stores"], one["global_loads"]) == \
+           (v1["shared_bytes"], v1["shared_loads"], v1["shared_stores"], v1["global_loads"])

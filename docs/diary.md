@@ -429,11 +429,140 @@ PENDING HARDWARE.
 
 ---
 
+## H14. The multirow kernel's weight load is narrow and goes through shared memory
+
+Hypothesis (formed from the `aot` table before reading any IR): at N = 512
+`triton_v3_multirow` shows `128:1 16:1` global loads and 1024 bytes of shared
+memory, where the row kernels show `128:2` and 8 to 64 bytes. The x tile is
+8 elements per thread at every N (one 128-bit load), so the 16-bit load must
+be the weight: a 1-D vector of BLOCK_N elements spread over all 512 threads
+is one element per thread at N = 512. The shared memory is 2 bytes x N
+(1024, 2048, 4096 at N = 512, 1024, 2048) and does not move with BLOCK_M,
+which fits a layout conversion of the bf16 weight vector into the tile's
+layout.
+
+Change: none in the kernels. The `aot` table gained `shared ld` / `shared st`
+(shared-memory accesses in the PTX by width), `layout converts`
+(`ttg.convert_layout` ops in the TTGIR) and `--dump-ir DIR`, which writes
+each compile's TTGIR and PTX.
+
+Measurement:
+```
+python -m rmsnorm.cli aot --impl triton_v1_warps --impl triton_v3_multirow --n 512 --n 1024 --n 2048 --n 4096 --arch sm_80 --dump-ir /tmp/ir
+```
+
+Result: confirmed in the IR. At 4096 x 512 (8 x 512 block, 16 warps) the
+TTGIR holds exactly one `ttg.convert_layout`, on the weight, in bf16, before
+the cast to float32:
+
+```
+#blocked  = sizePerThread = [1],    threadsPerWarp = [32],    warpsPerCTA = [16]      // how w is loaded: 1 element per thread
+#blocked1 = sizePerThread = [1, 8], threadsPerWarp = [1, 32], warpsPerCTA = [8, 2]    // the x tile: 8 contiguous per thread, warps = 8 rows x 2 column halves
+%39 = ttg.convert_layout %38 : tensor<512xbf16, #blocked> -> tensor<512xbf16, #ttg.slice<{dim = 0, parent = #blocked1}>>
+```
+
+The target is the column distribution of the x tile: each thread needs the 8
+contiguous weights that match its 8 x elements, and the 8 row-warps all need
+the same weights. The compiler loads w coalesced across all 512 threads, one
+bf16 each, writes it to shared memory and reads it back in the tile's
+layout. In the PTX that is one `st.shared.b16` and one `ld.shared.v4.b32`
+per thread with a barrier on each side: 4 `bar.sync` per program against
+the row kernels' 2. Shared memory is exactly 2 bytes x N, the vector in
+bf16; the reduction's one float per warp (64 B) is not live at the same time
+and reuses the space.
+
+| N | block | w global load | shared B | shared st / ld per thread, beyond the reduction's 2 x b32 each | bar.sync |
+|---|---|---|---|---|---|
+| 512 | 8 x 512 | 16-bit | 1024 | b16 / v4.b32 | 4 |
+| 1024 | 4 x 1024 | 32-bit | 2048 | b32 / v4.b32 | 4 |
+| 2048 | 2 x 2048 | 64-bit | 4096 | b64 / v4.b32 | 4 |
+| 4096 | 1 x 4096 | 128-bit | 64 | none | 2 |
+
+At N = 4096 (BLOCK_M = 1) the op is still in the TTGIR (`layout converts`
+reads 1) but its source and target layouts are the same distribution (8 per
+thread, 32 threads, 16 warps), so it lowers to nothing and the kernel
+compiles like v1. `tests/test_aot_stats.py` pins the 2N bytes, the 16-bit
+load, the convert count, and the row kernels' 4 bytes per warp.
+
+Explanation: a 1-D `tl.load` gets its own layout from the coalescing pass,
+chosen for that load alone: contiguous elements spread across every thread
+of the program. The 2-D tile's layout gives each thread 8 contiguous columns
+and replicates the columns across the row-warps. The two agree only when the
+tile has one row. For every other BLOCK_M the compiler inserts a conversion,
+and a conversion that moves data between threads goes through shared
+memory. The cost per program is 2N bytes of shared memory, one extra store
+and load per thread and two barriers, set against the design's stated
+benefit of loading the weight once per BLOCK_M rows. The weight is 1 KB per
+program at N = 512 against an 8 KB x tile, so this is a fixed cost per
+program, not a bandwidth term; whether two barriers show up at all is for
+the timing in H6.
+
+---
+
+## H14b. Two other ways to load the weight: one worse, one with no conversion
+
+Hypothesis: (a) loading w as a [1, BLOCK_N] block and broadcasting it lets
+the compiler choose a layout that matches the tile, removing the conversion.
+(b) loading w as a full [BLOCK_M, BLOCK_N] tile, every row of the block
+reading the same N weights, removes the conversion by construction, at the
+price of BLOCK_M times the weight-load requests, served from L1 after the
+first warp touches each line.
+
+Change: none to the shipped kernel. Both alternatives are compiled by
+`scripts/probe_h14b_weight_load.py` with the shipped kernel's launch plans.
+
+Measurement:
+```
+python scripts/probe_h14b_weight_load.py --ir
+```
+
+Result (compile-time, sm_80, bf16):
+
+| N | kernel | regs | shared B | global ld per thread | shared st / ld | converts | bar.sync |
+|---|---|---|---|---|---|---|---|
+| 512 | shipped | 27 | 1024 | 128:1 16:1 | 16:1 32:2 / 128:1 32:2 | 1 | 4 |
+| 512 | (a) 1 x N | 28 | 2048 | 128:1 16:1 | 32:3 / 128:2 32:2 | 1 | 4 |
+| 512 | (b) tile | 30 | 64 | 128:2 | 32:2 / 32:2 | 0 | 2 |
+| 1024 | shipped | 28 | 2048 | 128:1 32:1 | 32:3 / 128:1 32:2 | 1 | 4 |
+| 1024 | (a) 1 x N | 27 | 4096 | 128:1 32:1 | 64:1 32:2 / 128:2 32:2 | 1 | 4 |
+| 1024 | (b) tile | 29 | 64 | 128:2 | 32:2 / 32:2 | 0 | 2 |
+| 2048 | shipped | 29 | 4096 | 128:1 64:1 | 64:1 32:2 / 128:1 32:2 | 1 | 4 |
+| 2048 | (a) 1 x N | 30 | 8192 | 128:1 64:1 | 128:1 32:2 / 128:2 32:2 | 1 | 4 |
+| 2048 | (b) tile | 28 | 64 | 128:2 | 32:2 / 32:2 | 0 | 2 |
+
+(a) is worse. The [1, BLOCK_N] load gets the same one-element-per-thread
+distribution (`sizePerThread = [1, 1], warpsPerCTA = [1, 16]`), so the
+conversion stays. It now happens after the cast to float32, on the broadcast
+operand, so shared memory doubles to 4 bytes x N. The conversion comes from
+the mismatch between a load spread across every thread and a tile that
+replicates columns across row-warps; the tensor's rank does not enter.
+
+(b) compiles to no conversion: two 128-bit global loads per thread (x and
+w), the row kernels' shared-memory footprint (64 B, reduction only), 2
+barriers, registers within 3 of the shipped kernel. Each program now issues
+BLOCK_M times the weight-load requests: at N = 512 the 8 row-warps each
+request the same 1 KB of weights, so load requests per program go from 9 KB
+(8 KB of x, 1 KB of w) to 16 KB, all but the first touch of each line an L1
+hit, DRAM traffic unchanged. Per thread, the weight costs the shipped kernel
+one global load, one shared store, one shared load and two barriers; it
+costs (b) one global load. Whether seven extra L1 hits per weight line cost
+more than a shared round trip and two barriers is a timing question.
+
+Result (timing): PENDING HARDWARE. (b) is a candidate variant, not a change
+to v3: the shipped kernel is the one the design text describes, and the two
+should be timed side by side in H6 before either is dropped.
+
+---
+
 ## Candidates not yet built
 
 - `triton.autotune` over `num_warps` and `BLOCK_M`, to check whether the
   heuristics in `_warps_for` and `_rows_per_program` leave anything on the
   table, and what autotuning costs at first call per shape.
+- A multirow variant that loads the weight as a [BLOCK_M, BLOCK_N] tile
+  (H14b (b)): no shared-memory conversion and two fewer barriers per program,
+  BLOCK_M times the weight-load requests from L1. Time it against the shipped
+  v3 in H6 at 4096 x 512 and 16384 x 512; the compile-time facts are in H14b.
 - A CUDA kernel with warp-shuffle reductions and 16-byte vector loads. Built
   only if the Triton kernels sit more than ~10% below copy BW in the
   bandwidth-bound regime after H3-H7; the point would be to see what Triton's
@@ -443,5 +572,17 @@ PENDING HARDWARE.
 
 ## Failed and abandoned experiments
 
-None recorded yet. This section is for changes that did not help, kept when
-they explain something about the hardware or the compiler.
+Changes that did not help, kept when they explain something about the
+hardware or the compiler.
+
+- H14b (a): loading the multirow kernel's weight as a [1, BLOCK_N] block
+  instead of a 1-D vector. Hypothesis was that the 2-D shape would let the
+  compiler pick the tile's layout for the load. It did not: the load still
+  gets one element per thread across all 16 warps, the conversion stays, and
+  because it now runs after the cast to float32 the shared memory doubles
+  (2048 B against 1024 B at N = 512). The lesson is that the conversion is
+  about how the elements are distributed over threads, not about rank.
+- H12, first attempt: `tl.multiple_of` on the stride and N scalar arguments
+  to recover the alignment hints at N = 1000. The PTX did not change. The
+  divisibility analysis follows a multiplication by a `constexpr`, which is
+  what the ALIGN rescaling gives it.

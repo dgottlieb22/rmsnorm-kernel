@@ -17,9 +17,12 @@ the PTX for the target, and parses::
     ptxas info    : 192 bytes stack frame, 188 bytes spill stores, 188 bytes spill loads
 
 Theoretical occupancy and waves then follow from the per-SM limits of the
-target. What this cannot see: achieved occupancy, memory throughput, or
-anything that depends on how the kernel runs. Those need ``kernel_stats``
-and the profiler on a GPU.
+target. The PTX is also scanned for global and shared-memory loads and stores
+by access width, and ``dump_dir`` keeps the TTGIR and PTX of every compile so
+a layout question (where did that shared memory come from?) can be answered
+by reading the IR (diary H14). What this cannot see: achieved occupancy,
+memory throughput, or anything that depends on how the kernel runs. Those
+need ``kernel_stats`` and the profiler on a GPU.
 """
 from __future__ import annotations
 
@@ -80,6 +83,9 @@ class AotStats:
     limiter: str
     global_loads: str = ""   # PTX global loads by width in bits, "128:8 16:2"
     global_stores: str = ""
+    shared_loads: str = ""   # PTX shared-memory loads and stores by width; "-" when none
+    shared_stores: str = ""
+    layout_converts: int = 0  # ttg.convert_layout ops in the TTGIR (some lower to nothing)
 
 
 def _ptxas_path() -> str:
@@ -138,19 +144,26 @@ def compile_plan(plan: LaunchPlan, dtype: torch.dtype, m: int, n: int, arch: str
 
 _USED_RE = re.compile(r"Used (\d+) registers")
 _SPILL_RE = re.compile(r"(\d+) bytes stack frame, (\d+) bytes spill stores, (\d+) bytes spill loads")
-_ACCESS_RE = re.compile(r"\b(ld|st)\.global(?:\.[a-z]+)*\.(v\d\.)?(?:b|u|s|f)(\d+)")
+_ACCESS_RE = {
+    space: re.compile(rf"\b(ld|st)\.{space}(?:\.[a-z]+)*\.(v\d\.)?(?:b|u|s|f)(\d+)")
+    for space in ("global", "shared")
+}
 
 
-def access_widths(ptx: str) -> tuple[str, str]:
-    """Global load and store instructions in the PTX by access width in bits, e.g. ``"128:8"``.
+def access_widths(ptx: str, space: str = "global") -> tuple[str, str]:
+    """Load and store instructions to ``space`` in the PTX by access width in bits, e.g. ``"128:8"``.
 
     One 128-bit access per thread per 8 bf16 elements is the widest the
     hardware offers and what a coalesced kernel should show; 16-bit entries
     mean scalar bf16 accesses, eight times the instructions for the same bytes.
+    For ``space="shared"`` the counts show what the kernel stages through
+    shared memory: the row kernels only exchange one float per warp for the
+    reduction (two 32-bit stores and loads); anything wider is a layout
+    conversion (diary H14).
     """
     loads: dict[int, int] = {}
     stores: dict[int, int] = {}
-    for op, vec, bits in _ACCESS_RE.findall(ptx):
+    for op, vec, bits in _ACCESS_RE[space].findall(ptx):
         width = int(bits) * (int(vec[1]) if vec else 1)
         target = loads if op == "ld" else stores
         target[width] = target.get(width, 0) + 1
@@ -183,11 +196,19 @@ def ptxas_resources(ptx: str, arch: str) -> dict:
     }
 
 
-def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, specialize: bool = True) -> AotStats:
+def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, specialize: bool = True,
+              dump_dir: Path | None = None) -> AotStats:
     plan = plan_for(variant, m, n)
     compiled = compile_plan(plan, dtype, m, n, arch, specialize)
-    res = ptxas_resources(compiled.asm["ptx"], arch)
-    loads, stores = access_widths(compiled.asm["ptx"])
+    ptx, ttgir = compiled.asm["ptx"], compiled.asm["ttgir"]
+    if dump_dir is not None:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{variant}_{m}x{n}_{TRITON_DTYPE[dtype]}_{arch}" + ("" if specialize else "_nohints")
+        (dump_dir / f"{stem}.ttgir").write_text(ttgir)
+        (dump_dir / f"{stem}.ptx").write_text(ptx)
+    res = ptxas_resources(ptx, arch)
+    loads, stores = access_widths(ptx)
+    shared_loads, shared_stores = access_widths(ptx, "shared")
     shared = int(getattr(compiled.metadata, "shared", 0) or 0)
     limits = ARCHS[arch]
     programs, occ, limiter = occupancy(res["registers"], plan.num_warps, shared, limits)
@@ -200,6 +221,8 @@ def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, speci
         registers=res["registers"], spill_stores=res["spill_stores"], spill_loads=res["spill_loads"],
         stack_bytes=res["stack_bytes"], shared_bytes=shared, programs_per_sm=programs, occupancy=occ,
         waves=waves, limiter=limiter, global_loads=loads, global_stores=stores,
+        shared_loads=shared_loads, shared_stores=shared_stores,
+        layout_converts=ttgir.count("ttg.convert_layout"),
     )
 
 
@@ -210,18 +233,19 @@ DEFAULT_NS = [512, 1024, 2048, 4096, 5120, 8192, 16384]
 
 def collect(variants: Sequence[str] = DEFAULT_VARIANTS, ns: Sequence[int] = DEFAULT_NS, m: int = 4096,
             dtypes: Sequence[torch.dtype] = (torch.bfloat16,), archs: Sequence[str] = ("sm_80", "sm_90"),
-            specialize: bool = True, log=None) -> list[AotStats]:
+            specialize: bool = True, log=None, dump_dir: Path | None = None) -> list[AotStats]:
     rows = []
     for arch in archs:
         for dtype in dtypes:
             for n in ns:
                 for variant in variants:
-                    s = stats_for(variant, m, n, dtype, arch, specialize)
+                    s = stats_for(variant, m, n, dtype, arch, specialize, dump_dir)
                     rows.append(s)
                     if log:
                         log(f"{arch} {s.dtype} N={n:>6} {variant:<26} warps={s.num_warps:>2} block={s.block_m}x{s.block_n:<6} "
-                            f"align={s.align:>2} regs={s.registers:>3} spill={s.spill_stores:>4}B occ={s.occupancy:.0%} "
-                            f"({s.limiter}) ld[{s.global_loads}] st[{s.global_stores}]")
+                            f"align={s.align:>2} regs={s.registers:>3} spill={s.spill_stores:>4}B smem={s.shared_bytes:>5}B "
+                            f"occ={s.occupancy:.0%} ({s.limiter}) ld[{s.global_loads}] st[{s.global_stores}] "
+                            f"shared ld[{s.shared_loads}] st[{s.shared_stores}]")
     return rows
 
 
@@ -235,14 +259,15 @@ def write_csv(path: Path, rows: Sequence[AotStats]) -> None:
 
 
 def render_markdown(rows: Sequence[AotStats]) -> str:
-    lines = ["| arch | variant | dtype | hints | M x N | grid | warps | block | ALIGN | regs | spill B (st/ld) | smem B | programs/SM | occupancy | waves | limiter | global ld (bits:count) | global st |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| arch | variant | dtype | hints | M x N | grid | warps | block | ALIGN | regs | spill B (st/ld) | smem B | programs/SM | occupancy | waves | limiter | global ld (bits:count) | global st | shared ld | shared st | layout converts |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         block = f"{r.block_m}x{r.block_n}" if r.block_m > 1 else str(r.block_n)
         hints = "yes" if r.specialized else "no"
         lines.append(f"| {r.arch} | {r.variant} | {r.dtype} | {hints} | {r.m}x{r.n} | {r.grid} | {r.num_warps} | {block} | {r.align} | {r.registers} | "
                      f"{r.spill_stores}/{r.spill_loads} | {r.shared_bytes} | {r.programs_per_sm} | {r.occupancy:.0%} | "
-                     f"{r.waves:.2f} | {r.limiter} | {r.global_loads} | {r.global_stores} |")
+                     f"{r.waves:.2f} | {r.limiter} | {r.global_loads} | {r.global_stores} | {r.shared_loads} | {r.shared_stores} | "
+                     f"{r.layout_converts} |")
     return "\n".join(lines)
 
 

@@ -114,7 +114,8 @@ def cmd_aot(args) -> int:
     variants = args.impl or aot_stats.DEFAULT_VARIANTS
     dtypes = [DTYPE_BY_NAME[d] for d in (args.dtype or ["bf16"])]
     rows = aot_stats.collect(variants, ns, args.m, dtypes, args.arch or ["sm_80", "sm_90"],
-                             specialize=not args.no_specialize, log=print)
+                             specialize=not args.no_specialize, log=print,
+                             dump_dir=Path(args.dump_ir) if args.dump_ir else None)
     table = aot_stats.render_markdown(rows)
     print()
     print(table)
@@ -195,6 +196,8 @@ def main(argv=None) -> int:
     a.add_argument("--no-specialize", action="store_true",
                    help="compile without the launcher's 16-byte divisibility hints (misaligned-pointer code path)")
     a.add_argument("--out", default=None, help="CSV path; a .md table is written next to it")
+    a.add_argument("--dump-ir", default=None, metavar="DIR",
+                   help="write each compile's TTGIR and PTX to DIR (<variant>_<MxN>_<dtype>_<arch>.{ttgir,ptx})")
     a.set_defaults(fn=cmd_aot)
 
     sub.add_parser("env", help="print environment").set_defaults(fn=cmd_env)

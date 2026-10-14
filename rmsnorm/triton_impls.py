@@ -246,10 +246,11 @@ class LaunchPlan:
     constexprs: dict
     num_warps: int
     grid: int
+    kernel_fn: object | None = None   # a kernel outside this module (probe scripts); overrides kernel_name
 
     @property
     def kernel(self):
-        return globals()[self.kernel_name]
+        return self.kernel_fn if self.kernel_fn is not None else globals()[self.kernel_name]
 
     @property
     def block_n(self) -> int:

@@ -1,82 +1,82 @@
-| arch | variant | dtype | hints | M x N | grid | warps | block | ALIGN | regs | spill B (st/ld) | smem B | programs/SM | occupancy | waves | limiter | global ld (bits:count) | global st |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x512 | 4096 | 4 | 512 | 16 | 20 | 0/0 | 16 | 16 | 100% | 2.37 | warps | 64:2 | 64:1 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 24 | 0/0 | 8 | 32 | 100% | 1.19 | warps+blocks | 128:2 | 128:1 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 32 | 0/0 | 8 | 32 | 100% | 1.19 | registers+warps+blocks | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x512 | 512 | 16 | 8x512 | 16 | 27 | 0/0 | 1024 | 4 | 100% | 1.19 | registers+warps | 128:1 16:1 | 128:1 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 28 | 0/0 | 8 | 32 | 100% | 1.19 | registers+warps+blocks | 128:3 | 128:2 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x1000 | 1024 | 16 | 4x1024 | 8 | 28 | 0/0 | 2048 | 4 | 100% | 2.37 | registers+warps | 128:1 32:1 | 128:1 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:2 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x1024 | 1024 | 16 | 4x1024 | 16 | 28 | 0/0 | 2048 | 4 | 100% | 2.37 | registers+warps | 128:1 32:1 | 128:1 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:2 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x2048 | 4096 | 4 | 2048 | 16 | 38 | 0/0 | 16 | 12 | 75% | 3.16 | registers | 128:4 | 128:2 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 26 | 0/0 | 32 | 8 | 100% | 4.74 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 32 | 0/0 | 32 | 8 | 100% | 4.74 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x2048 | 2048 | 16 | 2x2048 | 16 | 29 | 0/0 | 4096 | 4 | 100% | 4.74 | registers+warps | 128:1 64:1 | 128:1 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 31 | 0/0 | 32 | 8 | 100% | 4.74 | registers+warps | 128:3 | 128:2 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x4096 | 4096 | 4 | 4096 | 16 | 62 | 0/0 | 16 | 8 | 50% | 4.74 | registers | 128:8 | 128:4 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 26 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 28 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:2 | 128:1 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 31 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:2 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x5120 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 9.48 | registers | 128:16 | 128:8 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x5120 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:6 | 128:4 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x8192 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 9.48 | registers | 128:16 | 128:8 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x8192 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:6 | 128:4 |
-| sm_80 | triton_v0_naive | bf16 | yes | 4096x16384 | 4096 | 4 | 16384 | 16 | 218 | 0/0 | 16 | 2 | 12% | 18.96 | registers | 128:32 | 128:16 |
-| sm_80 | triton_v1_warps | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 63 | 0/0 | 64 | 2 | 50% | 18.96 | registers | 128:8 | 128:4 |
-| sm_80 | triton_v2_looped | bf16 | yes | 4096x16384 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 |
-| sm_80 | triton_v3_multirow | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 63 | 0/0 | 64 | 2 | 50% | 18.96 | registers | 128:8 | 128:4 |
-| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 64 | 0/0 | 64 | 2 | 50% | 18.96 | registers | 128:12 | 128:8 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x512 | 4096 | 4 | 512 | 16 | 22 | 0/0 | 16 | 16 | 100% | 1.94 | warps | 64:2 | 64:1 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 26 | 0/0 | 8 | 32 | 100% | 0.97 | registers+warps+blocks | 128:2 | 128:1 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 32 | 0/0 | 8 | 32 | 100% | 0.97 | registers+warps+blocks | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x512 | 512 | 16 | 8x512 | 16 | 27 | 0/0 | 1024 | 4 | 100% | 0.97 | registers+warps | 128:1 16:1 | 128:1 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 28 | 0/0 | 8 | 32 | 100% | 0.97 | registers+warps+blocks | 128:3 | 128:2 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x1000 | 1024 | 16 | 4x1024 | 8 | 27 | 0/0 | 2048 | 4 | 100% | 1.94 | registers+warps | 128:1 32:1 | 128:1 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:2 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x1024 | 1024 | 16 | 4x1024 | 16 | 27 | 0/0 | 2048 | 4 | 100% | 1.94 | registers+warps | 128:1 32:1 | 128:1 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:2 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x2048 | 4096 | 4 | 2048 | 16 | 38 | 0/0 | 16 | 12 | 75% | 2.59 | registers | 128:4 | 128:2 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 26 | 0/0 | 32 | 8 | 100% | 3.88 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 32 | 0/0 | 32 | 8 | 100% | 3.88 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x2048 | 2048 | 16 | 2x2048 | 16 | 28 | 0/0 | 4096 | 4 | 100% | 3.88 | registers+warps | 128:1 64:1 | 128:1 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 30 | 0/0 | 32 | 8 | 100% | 3.88 | registers+warps | 128:3 | 128:2 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x4096 | 4096 | 4 | 4096 | 16 | 60 | 0/0 | 16 | 8 | 50% | 3.88 | registers | 128:8 | 128:4 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 26 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 28 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:2 | 128:1 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 30 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:2 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x5120 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 7.76 | registers | 128:16 | 128:8 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 39 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x5120 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:6 | 128:4 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x8192 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 7.76 | registers | 128:16 | 128:8 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 39 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x8192 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:6 | 128:4 |
-| sm_90 | triton_v0_naive | bf16 | yes | 4096x16384 | 4096 | 4 | 16384 | 16 | 216 | 0/0 | 16 | 2 | 12% | 15.52 | registers | 128:32 | 128:16 |
-| sm_90 | triton_v1_warps | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 63 | 0/0 | 64 | 2 | 50% | 15.52 | registers | 128:8 | 128:4 |
-| sm_90 | triton_v2_looped | bf16 | yes | 4096x16384 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 |
-| sm_90 | triton_v3_multirow | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 64 | 0/0 | 64 | 2 | 50% | 15.52 | registers | 128:8 | 128:4 |
-| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 64 | 0/0 | 64 | 2 | 50% | 15.52 | registers | 128:12 | 128:8 |
+| arch | variant | dtype | hints | M x N | grid | warps | block | ALIGN | regs | spill B (st/ld) | smem B | programs/SM | occupancy | waves | limiter | global ld (bits:count) | global st | shared ld | shared st | layout converts |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x512 | 4096 | 4 | 512 | 16 | 20 | 0/0 | 16 | 16 | 100% | 2.37 | warps | 64:2 | 64:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 24 | 0/0 | 8 | 32 | 100% | 1.19 | warps+blocks | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 32 | 0/0 | 8 | 32 | 100% | 1.19 | registers+warps+blocks | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x512 | 512 | 16 | 8x512 | 16 | 27 | 0/0 | 1024 | 4 | 100% | 1.19 | registers+warps | 128:1 16:1 | 128:1 | 128:1 32:2 | 32:2 16:1 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 28 | 0/0 | 8 | 32 | 100% | 1.19 | registers+warps+blocks | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x1000 | 1024 | 16 | 4x1024 | 8 | 28 | 0/0 | 2048 | 4 | 100% | 2.37 | registers+warps | 128:1 32:1 | 128:1 | 128:1 32:2 | 32:3 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x1024 | 1024 | 16 | 4x1024 | 16 | 28 | 0/0 | 2048 | 4 | 100% | 2.37 | registers+warps | 128:1 32:1 | 128:1 | 128:1 32:2 | 32:3 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 2.37 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x2048 | 4096 | 4 | 2048 | 16 | 38 | 0/0 | 16 | 12 | 75% | 3.16 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 26 | 0/0 | 32 | 8 | 100% | 4.74 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 32 | 0/0 | 32 | 8 | 100% | 4.74 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x2048 | 2048 | 16 | 2x2048 | 16 | 29 | 0/0 | 4096 | 4 | 100% | 4.74 | registers+warps | 128:1 64:1 | 128:1 | 128:1 32:2 | 64:1 32:2 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 31 | 0/0 | 32 | 8 | 100% | 4.74 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x4096 | 4096 | 4 | 4096 | 16 | 62 | 0/0 | 16 | 8 | 50% | 4.74 | registers | 128:8 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 26 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 28 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 31 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x5120 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 9.48 | registers | 128:16 | 128:8 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x5120 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:6 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x8192 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 9.48 | registers | 128:16 | 128:8 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x8192 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 38 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 12.64 | registers | 128:6 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v0_naive | bf16 | yes | 4096x16384 | 4096 | 4 | 16384 | 16 | 218 | 0/0 | 16 | 2 | 12% | 18.96 | registers | 128:32 | 128:16 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v1_warps | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 63 | 0/0 | 64 | 2 | 50% | 18.96 | registers | 128:8 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v2_looped | bf16 | yes | 4096x16384 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 9.48 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_80 | triton_v3_multirow | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 63 | 0/0 | 64 | 2 | 50% | 18.96 | registers | 128:8 | 128:4 | 32:2 | 32:2 | 1 |
+| sm_80 | triton_v4_fused_residual | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 64 | 0/0 | 64 | 2 | 50% | 18.96 | registers | 128:12 | 128:8 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x512 | 4096 | 4 | 512 | 16 | 22 | 0/0 | 16 | 16 | 100% | 1.94 | warps | 64:2 | 64:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 26 | 0/0 | 8 | 32 | 100% | 0.97 | registers+warps+blocks | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 32 | 0/0 | 8 | 32 | 100% | 0.97 | registers+warps+blocks | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x512 | 512 | 16 | 8x512 | 16 | 27 | 0/0 | 1024 | 4 | 100% | 0.97 | registers+warps | 128:1 16:1 | 128:1 | 128:1 32:2 | 32:2 16:1 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x512 | 4096 | 2 | 512 | 16 | 28 | 0/0 | 8 | 32 | 100% | 0.97 | registers+warps+blocks | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x1000 | 1024 | 16 | 4x1024 | 8 | 27 | 0/0 | 2048 | 4 | 100% | 1.94 | registers+warps | 128:1 32:1 | 128:1 | 128:1 32:2 | 32:3 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x1000 | 4096 | 4 | 1024 | 8 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 26 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x1024 | 1024 | 16 | 4x1024 | 16 | 27 | 0/0 | 2048 | 4 | 100% | 1.94 | registers+warps | 128:1 32:1 | 128:1 | 128:1 32:2 | 32:3 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x1024 | 4096 | 4 | 1024 | 16 | 32 | 0/0 | 16 | 16 | 100% | 1.94 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x2048 | 4096 | 4 | 2048 | 16 | 38 | 0/0 | 16 | 12 | 75% | 2.59 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 26 | 0/0 | 32 | 8 | 100% | 3.88 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 32 | 0/0 | 32 | 8 | 100% | 3.88 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x2048 | 2048 | 16 | 2x2048 | 16 | 28 | 0/0 | 4096 | 4 | 100% | 3.88 | registers+warps | 128:1 64:1 | 128:1 | 128:1 32:2 | 64:1 32:2 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x2048 | 4096 | 8 | 2048 | 16 | 30 | 0/0 | 32 | 8 | 100% | 3.88 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x4096 | 4096 | 4 | 4096 | 16 | 60 | 0/0 | 16 | 8 | 50% | 3.88 | registers | 128:8 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 26 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 28 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:2 | 128:1 | 32:2 | 32:2 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x4096 | 4096 | 16 | 4096 | 16 | 30 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x5120 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 7.76 | registers | 128:16 | 128:8 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 39 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x5120 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x5120 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:6 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x8192 | 4096 | 4 | 8192 | 16 | 127 | 0/0 | 16 | 4 | 25% | 7.76 | registers | 128:16 | 128:8 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 39 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x8192 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:4 | 128:2 | 32:2 | 32:2 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x8192 | 4096 | 16 | 8192 | 16 | 40 | 0/0 | 64 | 3 | 75% | 10.34 | registers | 128:6 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v0_naive | bf16 | yes | 4096x16384 | 4096 | 4 | 16384 | 16 | 216 | 0/0 | 16 | 2 | 12% | 15.52 | registers | 128:32 | 128:16 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v1_warps | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 63 | 0/0 | 64 | 2 | 50% | 15.52 | registers | 128:8 | 128:4 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v2_looped | bf16 | yes | 4096x16384 | 4096 | 16 | 4096 | 16 | 32 | 0/0 | 64 | 4 | 100% | 7.76 | registers+warps | 128:3 | 128:1 | 32:2 | 32:2 | 0 |
+| sm_90 | triton_v3_multirow | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 64 | 0/0 | 64 | 2 | 50% | 15.52 | registers | 128:8 | 128:4 | 32:2 | 32:2 | 1 |
+| sm_90 | triton_v4_fused_residual | bf16 | yes | 4096x16384 | 4096 | 16 | 16384 | 16 | 64 | 0/0 | 64 | 2 | 50% | 15.52 | registers | 128:12 | 128:8 | 32:2 | 32:2 | 0 |
