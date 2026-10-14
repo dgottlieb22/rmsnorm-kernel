@@ -106,9 +106,11 @@ if HAS_TRITON:
         ``BLOCK_N`` is the next power of two above N, so for N = 5120 a third
         of the lanes are masked off: they still take a slot in every
         instruction but load and store nothing. The float32 upcast happens in
-        registers; nothing wider than the input dtype touches memory.
+        registers; nothing wider than the input dtype touches memory. The row
+        offset is a 64-bit scalar so tensors past 2^31 elements index
+        correctly; the column vector stays 32-bit.
         """
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         cols = tl.arange(0, BLOCK_N)
         mask = cols < N
         x = tl.load(x_ptr + row * stride_xm + cols, mask=mask, other=0.0).to(tl.float32)
@@ -132,7 +134,7 @@ if HAS_TRITON:
         chunk). Pass 2 re-reads the row, which by then sits in L2, and writes
         the output. Register use is bounded by BLOCK_N, not by N.
         """
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         x_row = x_ptr + row * stride_xm
         y_row = y_ptr + row * stride_ym
         acc = tl.zeros([BLOCK_N], dtype=tl.float32)
@@ -164,7 +166,7 @@ if HAS_TRITON:
         reduction runs along axis 1 so each row still gets its own rstd.
         Rows past M are masked off in the last program.
         """
-        pid = tl.program_id(0)
+        pid = tl.program_id(0).to(tl.int64)
         rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
         cols = tl.arange(0, BLOCK_N)
         row_mask = rows < M
@@ -193,7 +195,7 @@ if HAS_TRITON:
         more precise value the unfused path never sees. The rounding is a
         register-only cast; it adds no memory traffic.
         """
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         cols = tl.arange(0, BLOCK_N)
         mask = cols < N
         x = tl.load(x_ptr + row * stride_xm + cols, mask=mask, other=0.0).to(tl.float32)
