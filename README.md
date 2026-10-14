@@ -8,15 +8,18 @@ number. It is being able to say, for every implementation and every shape,
 why it runs as fast as it does, and to show the measurement that supports
 the claim.
 
-Status, stated plainly: the implementations, the correctness suite (1133
-tests; 986 run on a CPU-only host, the rest need a GPU or a working
+Status, stated plainly: the implementations, the correctness suite (1139
+tests; 992 run on a CPU-only host, the rest need a GPU or a working
 `torch.compile`), the benchmark harness, the profiling tooling and the
 performance model are complete. This was built on a machine without a GPU;
-the Triton kernels were verified through Triton's CPU interpreter. No
-benchmark or profile has been run. Every section that needs measured numbers
-says PENDING HARDWARE, and `docs/diary.md` holds the hypotheses written down
-before the measurements so that the predictions cannot be adjusted after the
-fact. `scripts/run_all.sh` produces everything on a CUDA host.
+the Triton kernels were verified through Triton's CPU interpreter, and their
+register, spill and occupancy figures were obtained by compiling them offline
+for sm_80 and sm_90 (section 5). No benchmark or profile has been run. Every
+section that needs measured timings says PENDING HARDWARE, and
+`docs/diary.md` holds the hypotheses written down before the measurements so
+that the predictions cannot be adjusted after the fact (one already had to
+be corrected by the compile-time data). `scripts/run_all.sh` produces
+everything on a CUDA host.
 
 ## 1. The operation and why it matters
 
@@ -185,14 +188,52 @@ Full text in `docs/methodology.md`; implementation in `rmsnorm/bench.py`.
   outputs once, weight once), as GB/s and as a fraction of a device-to-device
   copy measured on the same GPU at the start of the run. Spec-sheet
   bandwidth is recorded but not used as the roofline.
-- Shape matrix: M in {1, 8, 64, 512, 4096, 16384} x N in {512, 768, 1024,
-  2048, 4096, 5120, 8192, 16384}, bf16 by default, fp16 and fp32 on request.
-  M = 1 and 8 are decode, 64 and 512 small batches, 4096 and 16384 prefill;
-  N spans small models to Llama 70B's 8192 and two non-powers of two.
+- Shape matrix: M in {1, 8, 64, 512, 4096, 16384} x N in {512, 768, 1000,
+  1024, 2048, 4096, 5120, 8192, 16384}, bf16 by default, fp16 and fp32 on
+  request. M = 1 and 8 are decode, 64 and 512 small batches, 4096 and 16384
+  prefill; N spans small models to Llama 70B's 8192, two non-powers of two,
+  and one size (1000) whose row stride is not a multiple of 16 bytes.
 
 ## 5. Results
 
-PENDING HARDWARE. `scripts/run_all.sh` writes `results/<run>/report.md` with,
+### Measured here: compile-time resources (no GPU needed)
+
+Triton compiles on the CPU and ships NVIDIA's `ptxas`, so every variant can be
+compiled for a target SM with the same argument specialization the launcher
+applies, and registers, spills, shared memory and theoretical occupancy read
+off the assembler (`python -m rmsnorm.cli aot`, module `rmsnorm/aot_stats.py`).
+These are facts about the generated code, not timings. sm_80 (A100), bf16,
+M = 4096; the full table for sm_80 and sm_90 is `docs/results/aot_stats_bf16.md`.
+
+| N | v0 naive (4 warps) | v1 warps | v2 looped (4096 chunks) | v3 multirow |
+|---|---|---|---|---|
+| 512 | 20 regs, 100% occ | 2 warps, 24 regs, 100% | 32 regs, 100% | 8x512 block, 16 warps, 28 regs, 100%, grid 512 |
+| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 27 regs, 100% |
+| 4096 | 62 regs, 50% | 16 warps, 26 regs, 100% | 32 regs, 100% | 1x4096, 28 regs, 100% |
+| 5120 / 8192 | 125 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% |
+| 16384 | 213 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% |
+
+No variant spills at any shape in the matrix. Three things this already
+settles (diary H3, H4, H12, H13):
+
+- The naive kernel's problem on long rows is register-capped occupancy, not
+  spilling: 213 registers per thread at N = 16384 leaves room for 2 programs
+  of 4 warps per SM. The model's first guess (spills) was wrong and is
+  corrected in the diary, not erased.
+- The 8-elements-per-thread heuristic holds registers at 26 wherever it can
+  reach 8; once the 16-warp cap forces 16 and 32 elements per thread
+  (N >= 8192) occupancy drops to 75% and 50%. The looped kernel is flat at 32
+  registers and 100% at every N.
+- The launcher's 16-byte divisibility hints are part of the kernel. Compiled
+  without them (`aot --no-specialize`, the code path a misaligned pointer or
+  a stride not divisible by 16 takes), v0 at N = 16384 needs all 255
+  registers and spills 188 bytes, and v1's count rises from 63 to 110. A
+  hidden size of 1000 compiles to a kernel that stages data through 2 KB of
+  shared memory to convert layouts; 1024 needs 16 bytes.
+
+### Pending hardware: timing and profiles
+
+`scripts/run_all.sh` writes `results/<run>/report.md` with,
 per dtype and cache mode and per N, a table of M rows x implementations
 (median us, GB/s, % of copy bandwidth), a speedup table against the eager
 baseline, a host-vs-GPU time table at the smallest M, and plots of bandwidth
@@ -204,7 +245,7 @@ The sections that will be filled in from those files:
 - Latency and bandwidth table, 4096 x N for all N, all implementations.
 - Bandwidth against M at N = 4096: where each implementation leaves the
   launch-bound regime and where it reaches the roofline.
-- The N = 512 and N = 5120 columns against their neighbors (H6, H7).
+- The N = 512, 1000 and 5120 columns against their neighbors (H6, H7, H12).
 - Fused residual against the unfused pair and against vLLM (H9).
 - Cold against warm L2 (H10).
 - Where PyTorch, Inductor or a vendor kernel is faster than ours, with the
@@ -212,8 +253,15 @@ The sections that will be filled in from those files:
 
 ## 6. Profiling
 
-PENDING HARDWARE for the data; the tooling is in place:
+PENDING HARDWARE for the runtime data; the tooling is in place, and one
+tool already produces data here:
 
+- `python -m rmsnorm.cli aot --arch sm_80 --arch sm_90`: compiles every
+  variant offline for the target SM with the launcher's specialization,
+  runs the bundled `ptxas -v`, and reports registers, spill bytes, shared
+  memory, programs per SM, theoretical occupancy with its limiter, and waves.
+  `--no-specialize` shows the kernel a misaligned input gets. Results in
+  section 5.
 - `python -m rmsnorm.cli kernels --impl torch_eager --shape 4096x4096`:
   CUDA kernels launched per call with their device time (`torch.profiler`).
   For the baseline this is the count of separate kernels and the difference
@@ -277,7 +325,8 @@ per layer.
 | What changed when you altered the tile size? | H4 (warps per row), H5b (chunk width), H6b (rows per program); `stats` output for registers and occupancy |
 | What does occupancy mean here? | model section 3 (resident warps vs the limit, which resource binds, Little's law for bytes in flight); `stats` limiter column |
 | Why is your kernel faster at hidden size 4096 but slower at 512? | model section 3 (instruction-bound regime), H3 and H6 |
-| Why does the naive kernel collapse at N = 16384? | H3 and H4: register spills with 4 warps, visible in `n_spills` and local memory sectors |
+| Why does the naive kernel degrade at N = 16384? | H3, measured at compile time: 213 registers per thread caps residency at 2 programs x 4 warps per SM (12.5% occupancy); no spills. The timing half is pending |
+| Why do alignment hints matter? | H12, measured at compile time: without 16-byte divisibility hints the same kernel needs 255 registers and spills; a hidden size of 1000 compiles to a layout conversion through shared memory |
 | When does fusion help and by how much? | model section 1 (4 vs 5 bytes per element), H9 |
 | Why not trust a warm-cache benchmark? | H10 and the methodology |
 | Why is M = 1 slow for every implementation? | H11: launch-bound; host time vs GPU time table |
@@ -315,12 +364,14 @@ rmsnorm/external.py       vLLM / Liger / flash-attn adapters (optional)
 rmsnorm/tolerance.py      dtype-derived tolerances and error metrics
 rmsnorm/bench.py          timing protocol, traffic model, copy roofline, CSV
 rmsnorm/report.py         markdown tables and plots from a run directory
-rmsnorm/kernel_stats.py   registers / spills / occupancy / waves per variant
+rmsnorm/kernel_stats.py   registers / spills / occupancy / waves per variant (on a GPU)
+rmsnorm/aot_stats.py      the same from offline compilation + ptxas, for a chosen SM, no GPU needed
 rmsnorm/profile.py        nsys/ncu target, torch.profiler kernel table
 rmsnorm/cli.py            command line
 tests/                    correctness matrix, mutants, numerics pins, harness, GPU-only
 scripts/                  run_all.sh, ncu.sh, nsys.sh, ncu_summary.py
 docs/performance-model.md predictions and the regimes
 docs/methodology.md       how correctness and timing are done, and what is refused
-docs/diary.md             one hypothesis per experiment; results pending hardware
+docs/diary.md             one hypothesis per experiment; compile-time results in; timings pending hardware
+docs/results/             curated data the text cites, each file with its provenance
 ```

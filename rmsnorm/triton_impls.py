@@ -31,6 +31,8 @@ is how the correctness tests run on a machine without a GPU.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from .reference import _check_shapes
@@ -210,45 +212,131 @@ if HAS_TRITON:
         tl.store(y_ptr + row * stride_ym + cols, y.to(y_ptr.dtype.element_ty), mask=mask)
 
 
-def _launch_row_kernel(x: torch.Tensor, weight: torch.Tensor, eps: float, num_warps: int):
+@dataclass(frozen=True)
+class LaunchPlan:
+    """What a wrapper launches for a given (M, N): kernel, block constants, warps, grid.
+
+    The runtime wrappers launch plans; ``aot_stats`` compiles the same plans
+    offline (no GPU needed) to read registers and spills, so the two can never
+    disagree about what "variant X at shape S" means.
+    """
+    variant: str
+    kernel_name: str
+    constexprs: dict
+    num_warps: int
+    grid: int
+
+    @property
+    def kernel(self):
+        return globals()[self.kernel_name]
+
+    @property
+    def block_n(self) -> int:
+        return self.constexprs["BLOCK_N"]
+
+    @property
+    def block_m(self) -> int:
+        return self.constexprs.get("BLOCK_M", 1)
+
+
+# Chunk width for the looped kernel. 4096 float32 accumulators over 8 warps is
+# 16 per thread, which leaves room for the loaded chunk and the weight chunk.
+LOOPED_BLOCK_N = 4096
+
+
+def _rows_per_program(block_n: int, target_elems: int = 4096) -> int:
+    """Rows per program so a program covers about ``target_elems`` elements."""
+    return max(1, min(64, target_elems // block_n))
+
+
+def plan_row(m: int, n: int, num_warps: int | None = None, variant: str = "triton_v1_warps") -> LaunchPlan:
+    """Single-row kernel. ``num_warps=None`` applies the 8-elements-per-thread heuristic (v1)."""
+    if n > MAX_SINGLE_BLOCK_N:
+        raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}; use the looped kernel")
+    block_n = triton.next_power_of_2(n)
+    warps = _warps_for(block_n) if num_warps is None else num_warps
+    return LaunchPlan(variant, "_rmsnorm_row_kernel", {"BLOCK_N": block_n}, warps, m)
+
+
+def plan_looped(m: int, n: int, block_n: int = LOOPED_BLOCK_N) -> LaunchPlan:
+    if block_n & (block_n - 1):
+        raise ValueError(f"block_n must be a power of two, got {block_n}")
+    block_n = min(block_n, triton.next_power_of_2(n))
+    return LaunchPlan("triton_v2_looped", "_rmsnorm_looped_kernel", {"BLOCK_N": block_n}, _warps_for(block_n), m)
+
+
+def plan_multirow(m: int, n: int, block_m: int | None = None) -> LaunchPlan:
+    block_n = triton.next_power_of_2(n)
+    if block_m is None:
+        block_m = _rows_per_program(block_n)
+    if block_m & (block_m - 1):
+        raise ValueError(f"block_m must be a power of two, got {block_m}")
+    return LaunchPlan("triton_v3_multirow", "_rmsnorm_multirow_kernel", {"BLOCK_M": block_m, "BLOCK_N": block_n},
+                      _warps_for(block_m * block_n), triton.cdiv(m, block_m))
+
+
+def plan_fused_residual(m: int, n: int) -> LaunchPlan:
+    if n > MAX_SINGLE_BLOCK_N:
+        raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}")
+    block_n = triton.next_power_of_2(n)
+    return LaunchPlan("triton_v4_fused_residual", "_rmsnorm_fused_residual_kernel", {"BLOCK_N": block_n},
+                      _warps_for(block_n), m)
+
+
+def plan_for(variant: str, m: int, n: int) -> LaunchPlan:
+    """The plan each registered variant launches at (M, N), including the dispatcher's choice."""
+    if variant == "triton_v0_naive":
+        return plan_row(m, n, num_warps=4, variant=variant)
+    if variant == "triton_v1_warps":
+        return plan_row(m, n)
+    if variant == "triton_v2_looped":
+        return plan_looped(m, n)
+    if variant == "triton_v3_multirow":
+        return plan_multirow(m, n)
+    if variant == "triton_v4_fused_residual":
+        return plan_fused_residual(m, n)
+    if variant == "triton":
+        if n <= MULTIROW_MAX_N:
+            return plan_multirow(m, n)
+        if n >= LOOPED_MIN_N:
+            return plan_looped(m, n)
+        return plan_row(m, n)
+    raise KeyError(variant)
+
+
+def _launch(plan: LaunchPlan, *args):
+    kernel = plan.kernel[(plan.grid,)](*args, **plan.constexprs, num_warps=plan.num_warps)
+    _record(kernel, kernel_name=plan.kernel_name, grid=plan.grid, num_warps=plan.num_warps, **plan.constexprs)
+    return kernel
+
+
+def _run_plain(plan_fn, x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     x2 = _as_rows(x)
     m, n = x2.shape
     y = torch.empty_like(x2)
     if m == 0:
-        return y.view(x.shape), None
-    if n > MAX_SINGLE_BLOCK_N:
-        raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}; use the looped kernel")
-    block_n = triton.next_power_of_2(n)
-    kernel = _rmsnorm_row_kernel[(m,)](
-        x2, weight.contiguous(), y,
-        x2.stride(0), y.stride(0),
-        n, eps,
-        BLOCK_N=block_n, num_warps=num_warps,
-    )
-    _record(kernel, kernel_name="_rmsnorm_row_kernel", grid=m, BLOCK_N=block_n, num_warps=num_warps)
-    return y.view(x.shape), kernel
+        return y.view(x.shape)
+    plan = plan_fn(m, n)
+    if plan.kernel_name == "_rmsnorm_multirow_kernel":
+        args = (x2, weight.contiguous(), y, x2.stride(0), y.stride(0), m, n, eps)
+    else:
+        args = (x2, weight.contiguous(), y, x2.stride(0), y.stride(0), n, eps)
+    _launch(plan, *args)
+    return y.view(x.shape)
 
 
 def rmsnorm_triton_v0_naive(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """One row per program, whole row in one block, 4 warps for every N."""
     _require_triton()
     _check_shapes(x, weight)
-    y, _ = _launch_row_kernel(x, weight, eps, num_warps=4)
-    return y
+    return _run_plain(lambda m, n: plan_row(m, n, num_warps=4, variant="triton_v0_naive"), x, weight, eps)
 
 
 def rmsnorm_triton_v1_warps(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """v0 with ``num_warps`` scaled to the row: about 8 elements per thread."""
     _require_triton()
     _check_shapes(x, weight)
-    block_n = triton.next_power_of_2(x.shape[-1])
-    y, _ = _launch_row_kernel(x, weight, eps, num_warps=_warps_for(block_n))
-    return y
-
-
-# Chunk width for the looped kernel. 4096 float32 accumulators over 8 warps is
-# 16 per thread, which leaves room for the loaded chunk and the weight chunk.
-LOOPED_BLOCK_N = 4096
+    return _run_plain(plan_row, x, weight, eps)
 
 
 def rmsnorm_triton_v2_looped(
@@ -257,29 +345,7 @@ def rmsnorm_triton_v2_looped(
     """Two passes over each row in ``block_n`` chunks; register use independent of N."""
     _require_triton()
     _check_shapes(x, weight)
-    if block_n & (block_n - 1):
-        raise ValueError(f"block_n must be a power of two, got {block_n}")
-    x2 = _as_rows(x)
-    m, n = x2.shape
-    y = torch.empty_like(x2)
-    if m == 0:
-        return y.view(x.shape)
-    block_n = min(block_n, triton.next_power_of_2(n))
-    num_warps = _warps_for(block_n)
-    kernel = _rmsnorm_looped_kernel[(m,)](
-        x2, weight.contiguous(), y,
-        x2.stride(0), y.stride(0),
-        n, eps,
-        BLOCK_N=block_n, num_warps=num_warps,
-    )
-    _record(kernel, kernel_name="_rmsnorm_looped_kernel", grid=m, BLOCK_N=block_n, num_warps=num_warps,
-            chunks=triton.cdiv(n, block_n))
-    return y.view(x.shape)
-
-
-def _rows_per_program(block_n: int, target_elems: int = 4096) -> int:
-    """Rows per program so a program covers about ``target_elems`` elements."""
-    return max(1, min(64, target_elems // block_n))
+    return _run_plain(lambda m, n: plan_looped(m, n, block_n), x, weight, eps)
 
 
 def rmsnorm_triton_v3_multirow(
@@ -288,27 +354,7 @@ def rmsnorm_triton_v3_multirow(
     """Several rows per program; meant for short rows (N <= 1024 or so)."""
     _require_triton()
     _check_shapes(x, weight)
-    x2 = _as_rows(x)
-    m, n = x2.shape
-    y = torch.empty_like(x2)
-    if m == 0:
-        return y.view(x.shape)
-    block_n = triton.next_power_of_2(n)
-    if block_m is None:
-        block_m = _rows_per_program(block_n)
-    if block_m & (block_m - 1):
-        raise ValueError(f"block_m must be a power of two, got {block_m}")
-    grid = (triton.cdiv(m, block_m),)
-    num_warps = _warps_for(block_m * block_n)
-    kernel = _rmsnorm_multirow_kernel[grid](
-        x2, weight.contiguous(), y,
-        x2.stride(0), y.stride(0),
-        m, n, eps,
-        BLOCK_M=block_m, BLOCK_N=block_n, num_warps=num_warps,
-    )
-    _record(kernel, kernel_name="_rmsnorm_multirow_kernel", grid=grid[0], BLOCK_M=block_m, BLOCK_N=block_n,
-            num_warps=num_warps)
-    return y.view(x.shape)
+    return _run_plain(lambda m, n: plan_multirow(m, n, block_m), x, weight, eps)
 
 
 def rmsnorm_triton_v4_fused_residual(
@@ -328,17 +374,8 @@ def rmsnorm_triton_v4_fused_residual(
     s = torch.empty_like(x2)
     if m == 0:
         return y.view(x.shape), s.view(x.shape)
-    if n > MAX_SINGLE_BLOCK_N:
-        raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}")
-    block_n = triton.next_power_of_2(n)
-    num_warps = _warps_for(block_n)
-    kernel = _rmsnorm_fused_residual_kernel[(m,)](
-        x2, r2, weight.contiguous(), y, s,
-        x2.stride(0), r2.stride(0), y.stride(0), s.stride(0),
-        n, eps,
-        BLOCK_N=block_n, num_warps=num_warps,
-    )
-    _record(kernel, kernel_name="_rmsnorm_fused_residual_kernel", grid=m, BLOCK_N=block_n, num_warps=num_warps)
+    plan = plan_fused_residual(m, n)
+    _launch(plan, x2, r2, weight.contiguous(), y, s, x2.stride(0), r2.stride(0), y.stride(0), s.stride(0), n, eps)
     return y.view(x.shape), s.view(x.shape)
 
 
@@ -351,9 +388,6 @@ LOOPED_MIN_N = 8192
 
 def rmsnorm_triton(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Pick a kernel by row length: multirow for short rows, looped for long ones."""
-    n = x.shape[-1]
-    if n <= MULTIROW_MAX_N:
-        return rmsnorm_triton_v3_multirow(x, weight, eps)
-    if n >= LOOPED_MIN_N:
-        return rmsnorm_triton_v2_looped(x, weight, eps)
-    return rmsnorm_triton_v1_warps(x, weight, eps)
+    _require_triton()
+    _check_shapes(x, weight)
+    return _run_plain(lambda m, n: plan_for("triton", m, n), x, weight, eps)

@@ -1,0 +1,98 @@
+"""Compile-time resource facts from offline compilation (no GPU needed).
+
+These pin what ``docs/diary.md`` H3 and H4 cite: numbers read from ptxas on
+the PTX Triton 3.4.0 emits for sm_80. They are facts about this compiler
+version, so a Triton upgrade that changes code generation fails here on
+purpose; the diary then needs a new look, not a looser test.
+
+The test session enables Triton's interpreter for the runtime tests, and
+that patch cannot be undone in-process, so the compiler runs in a clean
+subprocess and the test reads its CSV.
+"""
+from __future__ import annotations
+
+import csv
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.slow
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_aot(tmp_path: Path, *args: str) -> dict:
+    out = tmp_path / "aot.csv"
+    env = {k: v for k, v in os.environ.items() if k != "TRITON_INTERPRET"}
+    cmd = [sys.executable, "-m", "rmsnorm.cli", "aot", "--arch", "sm_80", "--out", str(out), *args]
+    res = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-2000:]
+    rows = {}
+    with out.open() as fh:
+        for row in csv.DictReader(fh):
+            rows[(row["variant"], int(row["n"]), row["specialized"] == "True")] = row
+    return rows
+
+
+@pytest.fixture(scope="module")
+def hinted(tmp_path_factory):
+    return _run_aot(tmp_path_factory.mktemp("aot"),
+                    "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--impl", "triton_v2_looped",
+                    "--impl", "triton_v3_multirow",
+                    "--n", "512", "--n", "4096", "--n", "8192", "--n", "16384")
+
+
+@pytest.fixture(scope="module")
+def unhinted(tmp_path_factory):
+    return _run_aot(tmp_path_factory.mktemp("aot_nohints"), "--no-specialize",
+                    "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--n", "16384")
+
+
+def test_naive_long_row_is_register_limited_not_spilling(hinted):
+    """v0 at N = 16384 with 4 warps: ~213 registers, no spills, 2 programs per SM (12.5% occupancy)."""
+    s = hinted[("triton_v0_naive", 16384, True)]
+    assert int(s["registers"]) >= 200 and int(s["spill_stores"]) == 0
+    assert int(s["programs_per_sm"]) == 2 and s["limiter"] == "registers"
+    assert float(s["occupancy"]) == pytest.approx(8 / 64)
+
+
+def test_warps_heuristic_restores_occupancy_on_long_rows(hinted):
+    """v1 at N = 16384 (16 warps) uses under a third of v0's registers, no spills, 50% occupancy."""
+    v0 = hinted[("triton_v0_naive", 16384, True)]
+    v1 = hinted[("triton_v1_warps", 16384, True)]
+    assert int(v1["registers"]) < int(v0["registers"]) / 3
+    assert int(v1["spill_stores"]) == 0
+    assert float(v1["occupancy"]) >= 0.5
+
+
+def test_looped_kernel_registers_do_not_grow_with_n(hinted):
+    rows = [hinted[("triton_v2_looped", n, True)] for n in (4096, 8192, 16384)]
+    assert len({r["registers"] for r in rows}) == 1
+    assert all(float(r["occupancy"]) == 1.0 and int(r["spill_stores"]) == 0 for r in rows)
+
+
+def test_naive_kernel_at_4096_is_half_occupancy_from_registers(hinted):
+    s = hinted[("triton_v0_naive", 4096, True)]
+    assert int(s["num_warps"]) == 4 and s["limiter"] == "registers" and float(s["occupancy"]) == pytest.approx(0.5)
+    assert float(hinted[("triton_v1_warps", 4096, True)]["occupancy"]) == 1.0
+
+
+def test_dropping_alignment_hints_costs_registers_and_spills(hinted, unhinted):
+    """Without the launcher's 16-byte divisibility hints the same v0 kernel at N = 16384
+    needs all 255 registers and spills; v1's register count nearly doubles."""
+    h = hinted[("triton_v0_naive", 16384, True)]
+    p = unhinted[("triton_v0_naive", 16384, False)]
+    assert int(p["registers"]) > int(h["registers"])
+    assert int(p["spill_stores"]) > 0 and int(h["spill_stores"]) == 0
+    v1h = hinted[("triton_v1_warps", 16384, True)]
+    v1p = unhinted[("triton_v1_warps", 16384, False)]
+    assert int(v1p["registers"]) > 1.5 * int(v1h["registers"])
+
+
+def test_multirow_block_covers_eight_short_rows(hinted):
+    s = hinted[("triton_v3_multirow", 512, True)]
+    assert (int(s["block_m"]), int(s["block_n"]), int(s["num_warps"])) == (8, 512, 16)
+    assert int(s["grid"]) == 4096 // 8 and float(s["occupancy"]) == 1.0

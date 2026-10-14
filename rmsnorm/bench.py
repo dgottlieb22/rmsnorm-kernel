@@ -60,7 +60,8 @@ QUICK_SHAPES = [Shape(m, n) for m in (1, 64, 4096) for n in (512, 4096, 16384)]
 FULL_SHAPES = [
     Shape(m, n)
     for m in (1, 8, 64, 512, 4096, 16384)
-    for n in (512, 768, 1024, 2048, 4096, 5120, 8192, 16384)
+    # 1000 is not a multiple of 16: its row stride loses the launcher's alignment hint (diary H12).
+    for n in (512, 768, 1000, 1024, 2048, 4096, 5120, 8192, 16384)
 ]
 MATRICES = {"quick": QUICK_SHAPES, "full": FULL_SHAPES}
 MAX_ELEMENTS = 1 << 29  # 512M elements: 1 GiB in bf16 per tensor

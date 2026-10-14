@@ -119,7 +119,7 @@ program, one weight load per BLOCK_M rows.
 |---|---|---|---|
 | torch_eager | nowhere | everywhere | 8-10 kernels, each with full-size float32 intermediates: several times the traffic and the launches |
 | torch_compiled | mid and large shapes, close to our kernels | M = 1 (same launch floor as any single kernel; guards add host time) | Inductor fuses the graph into one or two Triton kernels with reasonable defaults |
-| triton_v0_naive | N in [1024, 4096], M large | N = 512 (too little per program); N >= 8192 (register spills with 4 warps: 16384 elements / 128 threads = 128 fp32 x and 128 w per thread) | fixed 4 warps regardless of N |
+| triton_v0_naive | N in [1024, 4096], M large | N = 512 (too little per program); N >= 8192 (4 warps hold 64-128 elements per thread: 125-213 registers, so 4 then 2 programs per SM; the original guess was spills, and the offline compile in diary H3 showed register-capped occupancy instead) | fixed 4 warps regardless of N |
 | triton_v1_warps | N in [2048, 8192] | N = 512 (still one row per program) | 8 elements per thread: one 16 B load each, room for occupancy |
 | triton_v2_looped | N >= 8192 | N <= 4096 (two passes and loop overhead for no benefit) | bounded registers; second pass re-reads from L2 |
 | triton_v3_multirow | N <= 1024 | large N (fewer programs, bigger blocks) | amortizes weight load and per-program overhead |

@@ -78,12 +78,35 @@ Measurement:
 ```
 python -m rmsnorm.cli bench --matrix full --impl torch_eager --impl triton_v0_naive
 python -m rmsnorm.cli stats --matrix full --impl triton_v0_naive
+python -m rmsnorm.cli aot --impl triton_v0_naive --arch sm_80 --arch sm_90
 scripts/ncu.sh triton_v0_naive 4096x16384
 ```
 Read: `n_spills` and `n_regs` at N = 16384 vs 4096; local memory sectors in
 the ncu summary; bandwidth at N = 512.
 
-Result: PENDING HARDWARE.
+Result (compile-time half, measured here with `aot`, Triton 3.4.0, bf16;
+full table in `docs/results/aot_stats_bf16.md`):
+
+| N | BLOCK_N | warps | registers (sm_80 / sm_90) | spills | programs per SM | theoretical occupancy |
+|---|---|---|---|---|---|---|
+| 512 | 512 | 4 | 20 / 22 | 0 | 16 | 100% |
+| 2048 | 2048 | 4 | 38 / 38 | 0 | 12 | 75% |
+| 4096 | 4096 | 4 | 62 / 60 | 0 | 8 | 50% |
+| 5120, 8192 | 8192 | 4 | 125 / 127 | 0 | 4 | 25% |
+| 16384 | 16384 | 4 | 213 / 216 | 0 | 2 | 12.5% |
+
+The spill prediction was wrong: with the alignment hints the launcher passes
+(see H12), the compiler fits N = 16384 in 213 registers with no spill. What
+does happen is that registers cap residency at 2 programs x 4 warps = 8
+warps per SM, 12.5% occupancy, falling by half at every doubling of N from
+2048 up. Each of those 128 threads keeps 128 elements (16 vector loads) in
+flight, so bytes in flight per SM are not obviously short of Little's law
+(see the model, section 3); whether 12.5% occupancy costs bandwidth here is
+exactly what the timing has to decide, and the revised prediction is: a
+moderate loss at 16384 (fewer warps to cover the reduction's latency and the
+tail of each program), not the collapse first predicted.
+
+Result (timing): PENDING HARDWARE.
 
 Explanation: PENDING HARDWARE.
 
@@ -106,11 +129,31 @@ Measurement:
 ```
 python -m rmsnorm.cli bench --matrix full --impl triton_v0_naive --impl triton_v1_warps
 python -m rmsnorm.cli stats --matrix full --impl triton_v0_naive --impl triton_v1_warps
+python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --arch sm_80 --arch sm_90
 ```
 Read: spills gone at 16384; per-N speedup of v1 over v0; occupancy and
 limiter columns.
 
-Result: PENDING HARDWARE.
+Result (compile-time half, measured here with `aot`, sm_80, bf16):
+
+| N | v0 warps / regs / occupancy | v1 warps / regs / occupancy |
+|---|---|---|
+| 512 | 4 / 20 / 100% | 2 / 24 / 100% (32 programs per SM, block limit) |
+| 2048 | 4 / 38 / 75% | 8 / 26 / 100% |
+| 4096 | 4 / 62 / 50% | 16 / 26 / 100% |
+| 8192 | 4 / 125 / 25% | 16 / 38 / 75% |
+| 16384 | 4 / 213 / 12.5% | 16 / 63 / 50% |
+
+Registers per thread scale with elements per thread, as expected: 8 elements
+per thread is 26 registers at every N where the heuristic reaches it. From
+N = 8192 up the cap of 16 warps means 16 and 32 elements per thread and the
+occupancy ceiling drops to 75% and 50%. There were no spills to remove (H3),
+so the change is from register-capped occupancy to warp-capped occupancy.
+Revised prediction: v1 over v0 is a clear win at N >= 8192 if occupancy
+matters there, close to flat at 4096 (50% occupancy with 32 elements per
+thread in flight against 100% with 8), and a coin flip at 512.
+
+Result (timing): PENDING HARDWARE.
 
 Explanation: PENDING HARDWARE.
 
@@ -296,6 +339,68 @@ Read: the "Host launch cost vs GPU time" table in the report.
 Result: PENDING HARDWARE.
 
 Explanation: PENDING HARDWARE.
+
+---
+
+## H12. The launcher's alignment hints change the kernel, not just its arguments
+
+Hypothesis (formed after the first offline compile, which had no hints and
+showed spills that the hinted compile did not): Triton's launcher marks every
+16-byte-aligned pointer and every integer divisible by 16 with
+`tt.divisibility = 16`. The compiler uses the hints to emit 128-bit loads and
+stores; without them it emits narrower accesses, more address arithmetic and
+more live values. The same source therefore compiles to a worse kernel for a
+misaligned input (a slice starting at an odd element) or for a row stride not
+divisible by 16 (a hidden size such as 1000).
+
+Change: none in code; `aot --no-specialize` compiles the hint-free variant.
+
+Measurement:
+```
+python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --n 4096 --n 16384 --arch sm_80
+python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --n 4096 --n 16384 --arch sm_80 --no-specialize
+python -m rmsnorm.cli aot --impl triton_v1_warps --n 1000 --n 1024 --arch sm_80
+```
+
+Result (compile-time, measured here, sm_80, bf16):
+
+| kernel | hints | registers | spills | occupancy |
+|---|---|---|---|---|
+| v0, N = 4096, 4 warps | yes | 62 | 0 | 50% |
+| v0, N = 4096, 4 warps | no | 104 | 0 | 25% |
+| v0, N = 16384, 4 warps | yes | 213 | 0 | 12.5% |
+| v0, N = 16384, 4 warps | no | 255 | 188 B stores, 188 B loads | 12.5% |
+| v1, N = 16384, 16 warps | yes | 63 | 0 | 50% |
+| v1, N = 16384, 16 warps | no | 110 | 0 | 25% |
+
+And N = 1000 against N = 1024 (stride 1000 is not divisible by 16, so the
+stride argument loses its hint while the pointers keep theirs): registers
+30 against 26, and 2048 bytes of shared memory against 16. The compiler
+routes the data through shared memory to convert between the load and store
+layouts it had to pick without the stride hint. So a hidden size that is not
+a multiple of 8 elements (16 bytes in bf16) runs a different kernel; the
+timing matrix has 5120 and 11008, both multiples of 16, and should gain a
+N = 1000-class shape to measure this. The runtime consequence of the
+misaligned path, where a model would hit it (slicing the hidden dimension),
+is PENDING HARDWARE.
+
+Explanation: the hints are what let the compiler prove that a 16-byte vector
+access is in bounds and aligned. Without proof it falls back to scalar or
+narrower accesses, each with its own address and predicate, which is where
+the extra registers go.
+
+---
+
+## H13. The looped kernel's register footprint is flat in N
+
+Hypothesis: `triton_v2_looped` holds one chunk at a time, so registers do not
+depend on N and occupancy stays at 100%.
+
+Result (compile-time, measured here, sm_80 and sm_90, bf16): 32 registers at
+N = 4096, 8192 and 16384 (16 warps, 4096-wide chunks), 0 spills, 4 programs
+per SM, 100% theoretical occupancy at every N. Confirmed. Whether the
+second pass over the row costs more than the occupancy buys back is H5,
+PENDING HARDWARE.
 
 ---
 

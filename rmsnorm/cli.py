@@ -5,6 +5,7 @@ report       render a run directory into report.md and plots
 stats        registers / spills / occupancy per Triton variant and shape (GPU only)
 kernels      torch.profiler kernel table for one implementation and shape (GPU only)
 target       run one implementation repeatedly for nsys / ncu to attach to (GPU only)
+aot          compile each variant offline for a target SM; registers, spills, occupancy (no GPU needed)
 env          print the environment the benchmark would record
 list         list implementations
 """
@@ -106,6 +107,25 @@ def cmd_target(args) -> int:
     return 0
 
 
+def cmd_aot(args) -> int:
+    from . import aot_stats
+
+    ns = [int(n) for n in args.n] if args.n else aot_stats.DEFAULT_NS
+    variants = args.impl or aot_stats.DEFAULT_VARIANTS
+    dtypes = [DTYPE_BY_NAME[d] for d in (args.dtype or ["bf16"])]
+    rows = aot_stats.collect(variants, ns, args.m, dtypes, args.arch or ["sm_80", "sm_90"],
+                             specialize=not args.no_specialize, log=print)
+    table = aot_stats.render_markdown(rows)
+    print()
+    print(table)
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        aot_stats.write_csv(out, rows)
+        out.with_suffix(".md").write_text(table + "\n")
+    return 0
+
+
 def cmd_env(args) -> int:
     print(json.dumps(environment(_device(require=False)), indent=2))
     return 0
@@ -165,6 +185,17 @@ def main(argv=None) -> int:
     t.add_argument("--warmup", type=int, default=10)
     t.add_argument("--iters", type=int, default=20)
     t.set_defaults(fn=cmd_target)
+
+    a = sub.add_parser("aot", help="compile each variant offline for an SM and report registers/spills/occupancy (no GPU needed)")
+    a.add_argument("--impl", action="append", default=None, help="variant name, repeatable")
+    a.add_argument("--n", action="append", default=None, help="row length, repeatable")
+    a.add_argument("--m", type=int, default=4096, help="row count used for the grid/waves column")
+    a.add_argument("--dtype", action="append", default=None, help="bf16|fp16|fp32, repeatable (default bf16)")
+    a.add_argument("--arch", action="append", default=None, help="sm_80|sm_86|sm_89|sm_90, repeatable")
+    a.add_argument("--no-specialize", action="store_true",
+                   help="compile without the launcher's 16-byte divisibility hints (misaligned-pointer code path)")
+    a.add_argument("--out", default=None, help="CSV path; a .md table is written next to it")
+    a.set_defaults(fn=cmd_aot)
 
     sub.add_parser("env", help="print environment").set_defaults(fn=cmd_env)
     sub.add_parser("list", help="list implementations").set_defaults(fn=cmd_list)
