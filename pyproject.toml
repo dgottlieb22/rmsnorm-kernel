@@ -40,4 +40,7 @@ filterwarnings = [
     "ignore:networkx backend defined more than once:RuntimeWarning",
     # Inductor probing for Python.h on a host without the headers.
     "ignore:Can't find Python.h:UserWarning",
+    # matplotlib 3.9 on a newer pyparsing; not ours to fix.
+    "ignore::DeprecationWarning:matplotlib",
+    "ignore::DeprecationWarning:pyparsing",
 ]

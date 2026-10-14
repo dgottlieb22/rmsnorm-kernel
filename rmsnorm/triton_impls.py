@@ -54,6 +54,21 @@ def _require_triton() -> None:
         raise RuntimeError("triton is not installed; pip install triton")
 
 
+# The most recent launch: (compiled kernel object or None, launch configuration).
+# ``kernel_stats`` reads this to report registers, spills, shared memory and
+# grid size for whatever the wrapper actually launched.
+_LAST_LAUNCH: tuple[object, dict] | None = None
+
+
+def _record(kernel, **config) -> None:
+    global _LAST_LAUNCH
+    _LAST_LAUNCH = (kernel, config)
+
+
+def last_launch() -> tuple[object, dict] | None:
+    return _LAST_LAUNCH
+
+
 def _as_rows(x: torch.Tensor) -> torch.Tensor:
     """View ``x`` as (M, N) with unit stride along N, copying only if needed."""
     n = x.shape[-1]
@@ -208,6 +223,7 @@ def _launch_row_kernel(x: torch.Tensor, weight: torch.Tensor, eps: float, num_wa
         n, eps,
         BLOCK_N=block_n, num_warps=num_warps,
     )
+    _record(kernel, kernel_name="_rmsnorm_row_kernel", grid=m, BLOCK_N=block_n, num_warps=num_warps)
     return y.view(x.shape), kernel
 
 
@@ -247,12 +263,15 @@ def rmsnorm_triton_v2_looped(
     if m == 0:
         return y.view(x.shape)
     block_n = min(block_n, triton.next_power_of_2(n))
-    _rmsnorm_looped_kernel[(m,)](
+    num_warps = _warps_for(block_n)
+    kernel = _rmsnorm_looped_kernel[(m,)](
         x2, weight.contiguous(), y,
         x2.stride(0), y.stride(0),
         n, eps,
-        BLOCK_N=block_n, num_warps=_warps_for(block_n),
+        BLOCK_N=block_n, num_warps=num_warps,
     )
+    _record(kernel, kernel_name="_rmsnorm_looped_kernel", grid=m, BLOCK_N=block_n, num_warps=num_warps,
+            chunks=triton.cdiv(n, block_n))
     return y.view(x.shape)
 
 
@@ -278,12 +297,15 @@ def rmsnorm_triton_v3_multirow(
     if block_m & (block_m - 1):
         raise ValueError(f"block_m must be a power of two, got {block_m}")
     grid = (triton.cdiv(m, block_m),)
-    _rmsnorm_multirow_kernel[grid](
+    num_warps = _warps_for(block_m * block_n)
+    kernel = _rmsnorm_multirow_kernel[grid](
         x2, weight.contiguous(), y,
         x2.stride(0), y.stride(0),
         m, n, eps,
-        BLOCK_M=block_m, BLOCK_N=block_n, num_warps=_warps_for(block_m * block_n),
+        BLOCK_M=block_m, BLOCK_N=block_n, num_warps=num_warps,
     )
+    _record(kernel, kernel_name="_rmsnorm_multirow_kernel", grid=grid[0], BLOCK_M=block_m, BLOCK_N=block_n,
+            num_warps=num_warps)
     return y.view(x.shape)
 
 
@@ -307,12 +329,14 @@ def rmsnorm_triton_v4_fused_residual(
     if n > MAX_SINGLE_BLOCK_N:
         raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}")
     block_n = triton.next_power_of_2(n)
-    _rmsnorm_fused_residual_kernel[(m,)](
+    num_warps = _warps_for(block_n)
+    kernel = _rmsnorm_fused_residual_kernel[(m,)](
         x2, r2, weight.contiguous(), y, s,
         x2.stride(0), r2.stride(0), y.stride(0), s.stride(0),
         n, eps,
-        BLOCK_N=block_n, num_warps=_warps_for(block_n),
+        BLOCK_N=block_n, num_warps=num_warps,
     )
+    _record(kernel, kernel_name="_rmsnorm_fused_residual_kernel", grid=m, BLOCK_N=block_n, num_warps=num_warps)
     return y.view(x.shape), s.view(x.shape)
 
 
