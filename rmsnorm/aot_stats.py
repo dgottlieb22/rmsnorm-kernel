@@ -120,7 +120,7 @@ def signature_and_attrs(plan: LaunchPlan, dtype: torch.dtype, m: int, n: int, sp
             signature[name] = f"*{dt}"
             if specialize:
                 attrs[(idx,)] = [["tt.divisibility", 16]]
-        elif name == "eps":
+        elif name in ("eps", "inv_n"):
             signature[name] = "fp32"
         else:
             signature[name] = "i32"
@@ -227,7 +227,7 @@ def stats_for(variant: str, m: int, n: int, dtype: torch.dtype, arch: str, speci
 
 
 DEFAULT_VARIANTS = ["triton_v0_naive", "triton_v1_warps", "triton_v2_looped", "triton_v3_multirow",
-                    "triton_v3b_wtile", "triton_v4_fused_residual"]
+                    "triton_v3b_wtile", "triton_v5_rowloop", "triton_v4_fused_residual"]
 DEFAULT_NS = [512, 1024, 2048, 4096, 5120, 8192, 16384]
 
 
@@ -239,7 +239,12 @@ def collect(variants: Sequence[str] = DEFAULT_VARIANTS, ns: Sequence[int] = DEFA
         for dtype in dtypes:
             for n in ns:
                 for variant in variants:
-                    s = stats_for(variant, m, n, dtype, arch, specialize, dump_dir)
+                    try:
+                        s = stats_for(variant, m, n, dtype, arch, specialize, dump_dir)
+                    except ValueError as e:   # the variant does not cover this N (e.g. the row loop past 1024)
+                        if log:
+                            log(f"{arch} {dtype} N={n:>6} {variant:<26} skipped: {e}")
+                        continue
                     rows.append(s)
                     if log:
                         log(f"{arch} {s.dtype} N={n:>6} {variant:<26} warps={s.num_warps:>2} block={s.block_m}x{s.block_n:<6} "

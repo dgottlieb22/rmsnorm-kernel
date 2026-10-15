@@ -41,7 +41,7 @@ def _run_aot(tmp_path: Path, *args: str) -> dict:
 def hinted(tmp_path_factory):
     return _run_aot(tmp_path_factory.mktemp("aot"),
                     "--impl", "triton_v0_naive", "--impl", "triton_v1_warps", "--impl", "triton_v2_looped",
-                    "--impl", "triton_v3_multirow", "--impl", "triton_v3b_wtile",
+                    "--impl", "triton_v3_multirow", "--impl", "triton_v3b_wtile", "--impl", "triton_v5_rowloop",
                     "--n", "512", "--n", "1000", "--n", "1024", "--n", "4096", "--n", "8192", "--n", "16384")
 
 
@@ -160,3 +160,43 @@ def test_weight_tile_variant_needs_no_layout_conversion(hinted):
         assert int(b["layout_converts"]) == 0 and int(b["shared_bytes"]) == 4 * int(b["num_warps"])
         assert (b["shared_loads"], b["shared_stores"]) == ("32:2", "32:2")
         assert abs(int(b["registers"]) - int(v3["registers"])) <= 3 and int(b["spill_stores"]) == 0
+
+
+def test_rowloop_has_no_shared_memory_and_no_barrier(hinted):
+    """v5 keeps one warp per program, so the reduction is shuffles only: no shared memory, no
+    barrier, no mask when N is a power of two and M a multiple of ROWS (diary H15). At M = 4096 it
+    runs 2 rows per program so the grid keeps 2048 warps; it does not cover N > 1024."""
+    for n in (512, 1024):
+        s = hinted[("triton_v5_rowloop", n, True)]
+        assert int(s["num_warps"]) == 1 and int(s["block_m"]) == 2 and int(s["grid"]) == 2048
+        assert int(s["shared_bytes"]) == 0 and (s["shared_loads"], s["shared_stores"]) == ("-", "-")
+        assert int(s["spill_stores"]) == 0 and int(s["layout_converts"]) == 0
+    assert ("triton_v5_rowloop", 4096, True) not in hinted
+
+
+def _sass_table(*args: str) -> dict:
+    env = {k: v for k, v in os.environ.items() if k != "TRITON_INTERPRET"}
+    cmd = [sys.executable, "scripts/sass_mix.py", "--arch", "sm_80", *args]
+    res = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-2000:]
+    rows = {}
+    for line in res.stdout.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) > 6 and cells[0].startswith("triton_"):
+            rows[(cells[0], int(cells[1]))] = {"insns": int(cells[5]), "per_elem": float(cells[6]),
+                                               "barrier": int(cells[9]), "shared": int(cells[8])}
+    return rows
+
+
+def test_rowloop_halves_instructions_per_element_on_short_rows():
+    """The H15 headline, pinned on the SASS: at N = 512 and 1024 v5 issues under half the
+    instructions per element of v1 (16.0 -> 7.8 and 16.3 -> 7.0 with 2 rows per program) and the
+    multirow kernel issues more than v1, not fewer."""
+    t = _sass_table("--impl", "triton_v1_warps", "--impl", "triton_v3_multirow", "--impl", "triton_v5_rowloop",
+                    "--n", "512", "--n", "1024")
+    for n in (512, 1024):
+        v1, v3, v5 = t[("triton_v1_warps", n)], t[("triton_v3_multirow", n)], t[("triton_v5_rowloop", n)]
+        assert 15.5 <= v1["per_elem"] <= 17.0
+        assert v3["per_elem"] > v1["per_elem"]
+        assert v5["per_elem"] < v1["per_elem"] / 2
+        assert v5["barrier"] == 0 and v5["shared"] == 0 and v1["barrier"] == 2

@@ -216,16 +216,28 @@ from L1 (H14b). Expect the difference to be a few percent at most, in v3b's
 favor if the barriers cost more than the L1 re-reads; the ncu comparison to
 read is L1 request count and `barrier` stall reasons.
 
+Revised after H15 (SASS counts): the 1.3-2x prediction has no
+instruction-level mechanism. v3's thread holds one row's 8 columns like v1's,
+converts its own 8 weights, runs the same prologue and the same cross-warp
+reduction, and issues more instructions per element than v1 (17.5 against
+16.0 at N = 512). What v3 changes is bytes requested for the weight (once per
+8 rows) and the program count; neither is a per-thread saving. The revised
+expectation is v3 within a few percent of v1 either way, and the kernel to
+beat them both on short rows is `triton_v5_rowloop` (H15), which halves the
+instructions per element and has no barrier.
+
 Change: 2-D block, reduction along axis 1.
 
 Measurement:
 ```
-python -m rmsnorm.cli bench --shape 64x512 --shape 4096x512 --shape 16384x512 --shape 4096x1024 --shape 4096x2048 --impl triton_v1_warps --impl triton_v3_multirow --impl triton_v3b_wtile
-python -m rmsnorm.cli stats --shape 4096x512 --impl triton_v1_warps --impl triton_v3_multirow --impl triton_v3b_wtile
+python -m rmsnorm.cli bench --shape 64x512 --shape 4096x512 --shape 16384x512 --shape 4096x1024 --shape 4096x2048 --impl triton_v1_warps --impl triton_v3_multirow --impl triton_v3b_wtile --impl triton_v5_rowloop
+python -m rmsnorm.cli stats --shape 4096x512 --impl triton_v1_warps --impl triton_v3_multirow --impl triton_v3b_wtile --impl triton_v5_rowloop
 scripts/ncu.sh triton_v3_multirow 4096x512
 scripts/ncu.sh triton_v3b_wtile 4096x512
+scripts/ncu.sh triton_v5_rowloop 4096x512
 ```
-For H6b, call `rmsnorm_triton_v3_multirow(x, w, eps, block_m=...)` directly.
+For H6b, call `rmsnorm_triton_v3_multirow(x, w, eps, block_m=...)` directly;
+for v5's ROWS sweep, `rmsnorm_triton_v5_rowloop(x, w, eps, rows=...)`.
 
 Result: PENDING HARDWARE.
 
@@ -567,6 +579,159 @@ pins the compile-time facts above, N = 1000 (ALIGN 8) included.
 
 ---
 
+## H15. Short rows: where the instructions go, and a kernel that halves them
+
+This entry is the first run of a stricter loop: measure, interpret, name the
+limiter, list three fixes with a predicted contribution each, build them one
+at a time, measure each on its own. The measurement is static SASS
+(`scripts/sass_mix.py`: ptxas to a cubin, nvdisasm, count executed
+instructions up to the last EXIT, by class). For the loop-free kernels the
+static count is what one thread executes. Full tables:
+`docs/results/sass_mix_bf16_sm80.md`, `docs/results/h15_short_rows_n512.md`,
+`docs/results/h15_short_rows_n1024.md`.
+
+### Stage 0: the kernels as they were
+
+Instructions per thread and per element, sm_80, bf16, M = 4096:
+
+| N | v0 naive | v1 warps | v3 multirow | v3b wtile |
+|---|---|---|---|---|
+| 512 | 102 / 25.5 | 128 / 16.0 | 140 / 17.5 | 133 / 16.6 |
+| 1024 | 130 / 16.2 | 130 / 16.2 | 143 / 17.9 | 135 / 16.9 |
+| 4096 | 313 / 9.8 | 134 / 16.8 | 129 / 16.1 | 129 / 16.1 |
+| 16384 | 1088 / 8.5 | 323 / 10.1 | 322 / 10.1 | 318 / 9.9 |
+
+Interpretation. Fitting count = fixed + rate x elements across v0 and v1
+gives 8.1 instructions per element and 65 per thread of fixed cost. With 8
+elements per thread (the v1 heuristic, which keeps every load 128-bit) the
+fixed cost is half the instruction stream. Reading the SASS of v1 at N = 512
+(128 instructions) says where it goes:
+
+| instructions | what |
+|---|---|
+| ~29 | prologue: parameter loads, program id, 64-bit address math, mask setup, register zeroing for the masked loads, two 128-bit loads |
+| ~24 | bf16 to f32 converts: PRMT + SHF.L for the high half of a pair, SHF.L (as IMAD.U32) for the low half: 1.5 per value, 8 x and 8 w |
+| 8 | square-accumulate: FMUL + 7 FFMA |
+| 10 | intra-warp reduction: 5 SHFL.BFLY + 5 FADD |
+| ~20 | cross-warp reduction: STS, BAR.SYNC, LDS, a second shuffle level, STS, BAR.SYNC, LDS |
+| 11 | mean and rsqrt: I2F of N, an IEEE-exact reciprocal (MUFU.RCP with 2 FSETP and 4 range-fixup FMULs), FFMA for eps, MUFU.RSQ |
+| 16 | x * rstd * w |
+| 4 | f32 to bf16 packs (F2FP.BF16.PACK_AB, one per pair) |
+| ~6 | store address (uniform datapath), exit guard, store |
+
+Two things the table settles before any timing. First, the multirow kernel
+does not reduce per-thread work: at N = 512 its thread holds one row's 8
+columns exactly as v1's does, converts its own 8 weights, runs the same
+prologue and the same cross-warp reduction, and pays the H14 layout change
+on top. v3 issues more instructions per element than v1 (17.5 against 16.0),
+not fewer. H6's "amortizes the weight load and the per-program fixed cost
+over 8 rows" was about bytes and programs, not instructions, and the
+predicted 1.3-2x has no instruction-level mechanism behind it. Second, the
+bottleneck on short rows, if the row count is large enough to fill the
+machine, is per-thread fixed cost: prologue, reduction and the division by
+N are 60% of the stream at 8 elements per thread.
+
+The limiter, named: issue rate is a candidate but not a proven one. At 16
+instructions per element and 4 bytes per element, holding an A100's 1.75
+TB/s copy bandwidth needs 7.0e12 thread-instructions per second, 36% of the
+part's peak issue rate (108 SMs x 4 schedulers x 32 lanes x 1.41 GHz); at
+7 per element it is 17%. So a perfectly fed GPU would not be issue-bound
+either way, and if N = 512 is slow on hardware the likelier causes are the
+two barriers per row (a warp waiting at BAR.SYNC issues nothing), the long
+dependent chain per row (load, convert, reduce, shuffle x5, shared memory,
+barrier, rsqrt, multiply, store) with few rows in flight per SM, and block
+scheduling of 4096 two-warp programs. Every fix below shortens that chain or
+removes barriers as well as cutting instructions.
+
+### Stage 1: three fixes, each measured alone (N = 512, baseline v1 = 128 instructions, 16.0 per element)
+
+| fix | mechanism | instructions | per element | occupancy effect |
+|---|---|---|---|---|
+| inv_n: pass 1/N from the host | drops I2F and the exact-reciprocal sequence (fp math 39 to 32) | 121 (-7) | 15.1 | none |
+| nomask: N == BLOCK_N known at compile time (includes the constant 1/N) | drops ISETP, predicates, CS2R zeroing | 113 (-15) | 14.1 | none |
+| 1warp: one warp per row, 16 elements per thread | no shared memory, no barrier, no second shuffle level; fixed cost over twice the elements | 176 for 16 | 11.0 (-31%) | capped at 50% by the 32-blocks-per-SM limit; bytes in flight unchanged (two 128-bit loads per thread) |
+
+Taken alone, the one-warp change is worth more than the other two together.
+The two cheap ones compose with it. As a check that the limit is the
+decomposition and not the kernel text, v3's own kernel compiled with
+BLOCK_M = 2 and 2 warps (one warp per row, 16 elements per thread) comes out
+at 189 instructions: 11.8 per element, the one-warp number plus the 2-D
+indexing, and still carrying the cross-warp reduction code because the
+compiler does not know the rows and the warps line up.
+
+### Stage 2: amortize the fixed cost across rows
+
+With one warp per row the remaining fixed cost is per program: prologue,
+weight load and converts, rsqrt setup. A loop over ROWS rows in the same
+warp pays it once (`_rowloop_kernel` in `scripts/probe_h15_short_rows.py`,
+`tl.static_range` so the count is exact). Weight hoisted, 1/N from the host,
+masked and unmasked:
+
+| ROWS | masked | unmasked | registers |
+|---|---|---|---|
+| 1 | 166 / 10.4 | 155 / 9.7 | 37 |
+| 2 | 275 / 8.6 | 249 / 7.8 | 47 |
+| 4 | 489 / 7.6 | 454 / 7.1 | 54 |
+| 8 | 913 / 7.1 | 850 / 6.6 | 47 |
+| 16 | 1825 / 7.1 | 1690 / 6.6 | 64 |
+
+The unmasked fit is 6.6 per element and 50 per program; the asymptote is
+reached by ROWS = 8. The same loop with 2 warps per row is 9.6 / 8.8 at
+ROWS = 8: the per-row barrier (23 BAR.SYNC for 8 rows) eats the gain, so the
+loop only works with one warp. The remaining 6.6 per element is close to the
+work itself: 1.5 converts, 1 FFMA, 2 FMUL, 0.5 pack, 0.25 load/store, and
+the reduction's 10 instructions over 16 elements.
+
+The trade is the grid. One warp per program and ROWS rows per program means
+M / ROWS warps in the whole launch; at M = 4096 and ROWS = 8 that is 512
+warps, under 5 per SM, far below the ~16 per SM the parallelism model wants.
+So ROWS has to follow M: `_rows_for` doubles ROWS only while the grid keeps
+at least 2048 programs (16 warps per SM on a 128-SM part), which gives
+ROWS = 2 at M = 4096 (7.8 per element) and ROWS = 8 from M = 16384 (6.6).
+This is the same trade H6 noted for v3's grid, now with a number on both
+sides.
+
+### Stage 3: the converts
+
+With the reduction and the prologue gone, bf16 to f32 conversion is the
+largest remaining item: Triton's `.to(tl.float32)` on a packed pair is
+PRMT + SHF.L for the high half and IMAD.U32 for the low half, three
+instructions per pair. Loading the pairs as int32 and unpacking by hand
+(`xv << 16`, `xv & 0xFFFF0000`) is two. Two ways to pack the result back:
+
+| pack | instructions (ROWS = 8) | per element | why |
+|---|---|---|---|
+| `tl.join` of the two halves, 2-D store | 1048 | 8.2 | the join is a layout change: 1 KB of shared memory, 128 LDS/STS and 31 barriers per program (H14's mechanism again) |
+| inline PTX `cvt.rn.bf16x2.f32` on int32 pairs | 836 | 6.5 | one instruction per pair, no layout change |
+
+The converts drop from 136 to 64, but fp math rises from 440 to 496: writing
+the sum of squares as `x_lo*x_lo + x_hi*x_hi` turns one FFMA chain into FMUL
++ FFMA per pair plus a separate reduction of the pair vector. Net gain 14
+instructions in 850, 1.6%, for inline assembly. Not adopted; recorded.
+
+### What shipped from H15
+
+`triton_v5_rowloop` (`_rmsnorm_rowloop_kernel`): one warp per program, ROWS
+rows in sequence, weight hoisted, 1/N from the host, no mask when N is a
+power of two and M a multiple of ROWS, ROWS from `_rows_for(M)`, N <= 1024
+(32 elements per thread in one warp at 1024; 80 registers there, 39%
+theoretical occupancy, register-limited). Registered, in the full
+correctness matrix (shapes past 1024 are reported as skips with the reason),
+pinned in `tests/test_aot_stats.py`: no shared memory, no barrier, and under
+half of v1's instructions per element at 512 and 1024 (7.8 and 7.0 at
+M = 4096 against 16.0 and 16.3). The dispatcher still picks v3 for short
+rows: H15 has shown that v3 cannot beat v1 by the mechanism H6 claimed, and
+that v5 issues half the instructions, but which is faster is the timing's
+call (H6, with v5 added to its measurement list).
+
+Result (timing): PENDING HARDWARE. What to read: at 4096 x 512 and
+16384 x 512, v5 against v1 and v3; ncu `smsp__inst_executed` to confirm the
+static counts, `smsp__warps_issue_stalled_barrier` and `_long_scoreboard` to
+see whether the barriers or the dependent chain were the cost, and achieved
+occupancy for v5 (theoretical 50% at 512, 39% at 1024).
+
+---
+
 ## Candidates not yet built
 
 - `triton.autotune` over `num_warps` and `BLOCK_M`, to check whether the
@@ -595,3 +760,15 @@ hardware or the compiler.
   to recover the alignment hints at N = 1000. The PTX did not change. The
   divisibility analysis follows a multiplication by a `constexpr`, which is
   what the ALIGN rescaling gives it.
+- H15, row loop with 2 warps per row: the per-row cross-warp reduction puts a
+  barrier pair in every iteration (23 BAR.SYNC for 8 rows) and the count
+  lands at 8.8-9.6 per element against 6.6-7.1 with one warp. The loop only
+  pays with a warp that owns the whole row.
+- H15, hand-unpacked bf16 with `tl.join` for the pack: interleaving two
+  vectors with `tl.join` is a layout change, and the compiler routes it
+  through 1 KB of shared memory with 31 barriers per program. The same pack
+  through inline `cvt.rn.bf16x2.f32` has no layout change and saves 1.6% of
+  the instructions, which did not justify inline assembly in the shipped
+  kernel. The lesson is the one from H14 again: any op that changes which
+  thread holds which element costs shared memory and barriers, and a
+  one-line `join` is such an op.

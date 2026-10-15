@@ -73,7 +73,7 @@ def occupancy(n_regs: int, num_warps: int, shared_bytes: int, limits: dict) -> t
     by_regs = limits["regs_per_sm"] // (regs_per_thread * threads) if regs_per_thread * threads else 0
     by_warps = max_warps // num_warps
     by_blocks = limits["max_blocks_per_sm"]
-    by_shared = limits["shared_per_sm"] // shared_bytes if shared_bytes else by_blocks
+    by_shared = limits["shared_per_sm"] // shared_bytes if shared_bytes else by_blocks + 1  # no shared memory: never binds
     candidates = {"registers": by_regs, "warps": by_warps, "blocks": by_blocks, "shared": by_shared}
     programs = max(0, min(candidates.values()))
     limiter = "+".join(k for k, v in candidates.items() if v == programs)

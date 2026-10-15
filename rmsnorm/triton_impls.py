@@ -18,6 +18,9 @@ variants, in the order they were written:
 * ``v3b_wtile``: v3 with the weight read as a [BLOCK_M, BLOCK_N] tile, so it
   arrives in the x tile's layout and skips the shared-memory layout change the
   1-D load needs (diary H14, H14b).
+* ``v5_rowloop``: one warp per program, ROWS rows one after another, weight
+  loaded once, 1/N from the host, no mask when the shape allows it. Half the
+  instructions per element of v1 on short rows (diary H15); N <= 1024.
 * ``v4_fused_residual``: residual add fused into the single-row kernel; also
   writes the updated residual stream.
 * ``rmsnorm_triton``: the dispatcher that picks a variant by row length.
@@ -52,6 +55,12 @@ HAS_TRITON = triton is not None
 # Largest row a single-block kernel will take. Beyond this the block no longer
 # fits in registers in any useful way and ``v2_looped`` is the right tool.
 MAX_SINGLE_BLOCK_N = 65536
+
+
+class UnsupportedShape(ValueError):
+    """A variant does not cover this (M, N). The dispatcher always does; a single
+    kernel may not (the row loop stops at N = 1024). Tests skip these cases and the
+    benchmark records them as error rows, so the limit is visible, not hidden."""
 
 
 def _require_triton() -> None:
@@ -239,6 +248,45 @@ if HAS_TRITON:
         tl.store(y_ptrs, y.to(y_ptr.dtype.element_ty), mask=mask)
 
     @triton.jit
+    def _rmsnorm_rowloop_kernel(
+        x_ptr, w_ptr, y_ptr,
+        stride_xm_div, stride_ym_div,
+        M, N_div, inv_n, eps,
+        ROWS: tl.constexpr, BLOCK_N: tl.constexpr, ALIGN: tl.constexpr, MASKED: tl.constexpr,
+    ):
+        """ROWS rows per program, one at a time, in a single warp.
+
+        Built for short rows from the SASS counts in diary H15. One warp owns
+        each row, so the reduction is five shuffles with no shared memory and
+        no barrier; the weight is loaded and converted once per program and
+        reused for ROWS rows; ``inv_n`` arrives from the host so the kernel
+        multiplies instead of dividing by N. With ``MASKED=False`` (N is a
+        power of two and M is a multiple of ROWS) there is no mask anywhere.
+        At N = 512 this is 6.6 instructions per element against v1's 16.
+        """
+        stride_xm = stride_xm_div * ALIGN
+        stride_ym = stride_ym_div * ALIGN
+        N = N_div * ALIGN
+        cols = tl.arange(0, BLOCK_N)
+        row0 = tl.program_id(0).to(tl.int64) * ROWS
+        if MASKED:
+            cmask = cols < N
+            w = tl.load(w_ptr + cols, mask=cmask, other=0.0).to(tl.float32)
+            for i in tl.static_range(ROWS):
+                row = row0 + i
+                mask = cmask & (row < M)
+                x = tl.load(x_ptr + row * stride_xm + cols, mask=mask, other=0.0).to(tl.float32)
+                rstd = tl.rsqrt(tl.sum(x * x, axis=0) * inv_n + eps)
+                tl.store(y_ptr + row * stride_ym + cols, (x * rstd * w).to(y_ptr.dtype.element_ty), mask=mask)
+        else:
+            w = tl.load(w_ptr + cols).to(tl.float32)
+            for i in tl.static_range(ROWS):
+                row = row0 + i
+                x = tl.load(x_ptr + row * stride_xm + cols).to(tl.float32)
+                rstd = tl.rsqrt(tl.sum(x * x, axis=0) * inv_n + eps)
+                tl.store(y_ptr + row * stride_ym + cols, (x * rstd * w).to(y_ptr.dtype.element_ty))
+
+    @triton.jit
     def _rmsnorm_fused_residual_kernel(
         x_ptr, r_ptr, w_ptr, y_ptr, s_ptr,
         stride_xm_div, stride_rm_div, stride_ym_div, stride_sm_div,
@@ -297,7 +345,7 @@ class LaunchPlan:
 
     @property
     def block_m(self) -> int:
-        return self.constexprs.get("BLOCK_M", 1)
+        return self.constexprs.get("BLOCK_M", self.constexprs.get("ROWS", 1))
 
 
 # Chunk width for the looped kernel. A 4096-wide chunk gets 16 warps from
@@ -329,7 +377,7 @@ def plan_row(m: int, n: int, num_warps: int | None = None, variant: str = "trito
              row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     """Single-row kernel. ``num_warps=None`` applies the 8-elements-per-thread heuristic (v1)."""
     if n > MAX_SINGLE_BLOCK_N:
-        raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}; use the looped kernel")
+        raise UnsupportedShape(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}; use the looped kernel")
     block_n = triton.next_power_of_2(n)
     warps = _warps_for(block_n) if num_warps is None else num_warps
     align = alignment(n, *(row_strides or (n,)))
@@ -361,11 +409,42 @@ def plan_multirow(m: int, n: int, block_m: int | None = None, row_strides: tuple
 
 def plan_fused_residual(m: int, n: int, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
     if n > MAX_SINGLE_BLOCK_N:
-        raise ValueError(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}")
+        raise UnsupportedShape(f"N={n} exceeds the single-block limit {MAX_SINGLE_BLOCK_N}")
     block_n = triton.next_power_of_2(n)
     align = alignment(n, *(row_strides or (n,)))
     return LaunchPlan("triton_v4_fused_residual", "_rmsnorm_fused_residual_kernel",
                       {"BLOCK_N": block_n, "ALIGN": align}, _warps_for(block_n), m)
+
+
+# The row-loop kernel keeps one warp per program, so its grid is M / ROWS warps in
+# total. Below about 16 warps per SM the device runs short of bytes in flight
+# (performance model, section 3), and 2048 programs covers 16 per SM up to 128
+# SMs; ROWS grows with M only while the grid stays above that.
+ROWLOOP_MIN_PROGRAMS = 2048
+ROWLOOP_MAX_ROWS = 8
+ROWLOOP_MAX_N = 1024   # 32 elements per thread in one warp; longer rows need more warps
+
+
+def _rows_for(m: int) -> int:
+    rows = 1
+    while rows < ROWLOOP_MAX_ROWS and m // (rows * 2) >= ROWLOOP_MIN_PROGRAMS:
+        rows *= 2
+    return rows
+
+
+def plan_rowloop(m: int, n: int, rows: int | None = None, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
+    """One warp per program, ROWS rows one after another, no mask when the shape allows it."""
+    if n > ROWLOOP_MAX_N:
+        raise UnsupportedShape(f"N={n} exceeds the row-loop limit {ROWLOOP_MAX_N}")
+    block_n = triton.next_power_of_2(n)
+    if rows is None:
+        rows = _rows_for(m)
+    if rows & (rows - 1):
+        raise ValueError(f"rows must be a power of two, got {rows}")
+    align = alignment(n, *(row_strides or (n,)))
+    masked = block_n != n or m % rows != 0
+    return LaunchPlan("triton_v5_rowloop", "_rmsnorm_rowloop_kernel",
+                      {"ROWS": rows, "BLOCK_N": block_n, "ALIGN": align, "MASKED": masked}, 1, triton.cdiv(m, rows))
 
 
 def plan_for(variant: str, m: int, n: int, row_strides: tuple[int, ...] = ()) -> LaunchPlan:
@@ -380,6 +459,8 @@ def plan_for(variant: str, m: int, n: int, row_strides: tuple[int, ...] = ()) ->
         return plan_multirow(m, n, row_strides=row_strides)
     if variant == "triton_v3b_wtile":
         return plan_multirow(m, n, row_strides=row_strides, weight_tile=True)
+    if variant == "triton_v5_rowloop":
+        return plan_rowloop(m, n, row_strides=row_strides)
     if variant == "triton_v4_fused_residual":
         return plan_fused_residual(m, n, row_strides=row_strides)
     if variant == "triton":
@@ -405,10 +486,13 @@ def _run_plain(plan_fn, x: torch.Tensor, weight: torch.Tensor, eps: float) -> to
         return y.view(x.shape)
     plan = plan_fn(m, n, (x2.stride(0), y.stride(0)))
     a = plan.constexprs["ALIGN"]
-    if "BLOCK_M" in plan.constexprs:  # the 2-D kernels also take M for the row mask
-        args = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a, m, n // a, eps)
+    common = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a)
+    if "ROWS" in plan.constexprs:   # the row loop takes M for the row mask and 1/N from the host
+        args = (*common, m, n // a, 1.0 / n, eps)
+    elif "BLOCK_M" in plan.constexprs:  # the 2-D kernels take M for the row mask
+        args = (*common, m, n // a, eps)
     else:
-        args = (x2, weight.contiguous(), y, x2.stride(0) // a, y.stride(0) // a, n // a, eps)
+        args = (*common, n // a, eps)
     _launch(plan, *args)
     return y.view(x.shape)
 
@@ -454,6 +538,15 @@ def rmsnorm_triton_v3b_wtile(
     _check_shapes(x, weight)
     return _run_plain(lambda m, n, s: plan_multirow(m, n, block_m, row_strides=s, weight_tile=True),
                       x, weight, eps)
+
+
+def rmsnorm_triton_v5_rowloop(
+    x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6, rows: int | None = None
+) -> torch.Tensor:
+    """One warp per program, ``rows`` rows in sequence, weight hoisted; for N <= 1024 (diary H15)."""
+    _require_triton()
+    _check_shapes(x, weight)
+    return _run_plain(lambda m, n, s: plan_rowloop(m, n, rows, row_strides=s), x, weight, eps)
 
 
 def rmsnorm_triton_v4_fused_residual(

@@ -125,6 +125,13 @@ performance to one change in code.
   layout change, two fewer barriers, BLOCK_M times the weight-load requests
   from L1. Same arithmetic as v3, bit-identical output; which is faster is
   H6c.
+- `triton_v5_rowloop`: one warp per program, ROWS rows one after another,
+  weight loaded and converted once, 1/N from the host, no mask when the shape
+  allows it. Built from the SASS counts in diary H15: a one-warp row has no
+  cross-warp reduction (no shared memory, no barrier), and the loop amortizes
+  the per-program prologue. 7.8 instructions per element at 4096 x 512
+  against v1's 16.0; the price is a grid of M / ROWS warps and 50% (block
+  limit) or 39% (registers, N = 1024) theoretical occupancy. N <= 1024.
 - `triton_v4_fused_residual`: the residual add inside the row kernel, writing
   both the normalized output and the new residual stream. The sum is rounded
   to the storage dtype before it is normalized so the result matches the
@@ -221,18 +228,29 @@ off the assembler (`python -m rmsnorm.cli aot`, module `rmsnorm/aot_stats.py`).
 These are facts about the generated code, not timings. sm_80 (A100), bf16,
 M = 4096; the full table for sm_80 and sm_90 is `docs/results/aot_stats_bf16.md`.
 
-| N | v0 naive (4 warps) | v1 warps | v2 looped (4096 chunks) | v3 multirow | v3b wtile |
+| N | v0 naive (4 warps) | v1 warps | v2 looped (4096 chunks) | v3 multirow | v3b wtile | v5 rowloop (1 warp) |
+|---|---|---|---|---|---|---|
+| 512 | 20 regs, 100% occ, 64-bit accesses | 2 warps, 24 regs, 100%, 128-bit | 32 regs, 100% | 8x512 block, 16 warps, 27 regs, 100%, grid 512, 1 KB smem | 30 regs, 100%, 64 B smem | 2 rows, 48 regs, 50% (block limit), 0 smem |
+| 1000 | 26 regs, 100%, 128-bit (ALIGN 8) | 4 warps, 26 regs, 100% | 32 regs, 100% | 4x1024, 28 regs, 100%, 2 KB smem | 29 regs, 100%, 64 B | 2 rows, 72 regs, 44%, masked |
+| 1024 | same as 1000 | same as 1000 | 32 regs, 100% | same as 1000 | same as 1000 | 2 rows, 80 regs, 39% |
+| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 29 regs, 100%, 4 KB smem | 28 regs, 100%, 64 B | not covered |
+| 4096 | 62 regs, 50% | 16 warps, 26 regs, 100% | 32 regs, 100% | 1x4096, 28 regs, 100% | same as v3 | not covered |
+| 5120 / 8192 | 127 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% | 40 regs, 75% | not covered |
+| 16384 | 218 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% | same as v3 | not covered |
+
+Executed SASS instructions per element (static count, loop-free kernels;
+`scripts/sass_mix.py`, full table `docs/results/sass_mix_bf16_sm80.md`):
+
+| N | v0 | v1 | v3 | v3b | v5 |
 |---|---|---|---|---|---|
-| 512 | 20 regs, 100% occ, 64-bit accesses | 2 warps, 24 regs, 100%, 128-bit | 32 regs, 100% | 8x512 block, 16 warps, 27 regs, 100%, grid 512, 1 KB smem | 30 regs, 100%, 64 B smem |
-| 1000 | 26 regs, 100%, 128-bit (ALIGN 8) | 4 warps, 26 regs, 100% | 32 regs, 100% | 4x1024, 28 regs, 100%, 2 KB smem | 29 regs, 100%, 64 B |
-| 2048 | 38 regs, 75% | 8 warps, 26 regs, 100% | 32 regs, 100% | 2x2048, 29 regs, 100%, 4 KB smem | 28 regs, 100%, 64 B |
-| 4096 | 62 regs, 50% | 16 warps, 26 regs, 100% | 32 regs, 100% | 1x4096, 28 regs, 100% | same as v3 |
-| 5120 / 8192 | 127 regs, 25% | 16 warps, 38 regs, 75% | 32 regs, 100% | 38 regs, 75% | 40 regs, 75% |
-| 16384 | 218 regs, 12.5% | 16 warps, 63 regs, 50% | 32 regs, 100% | 63 regs, 50% | same as v3 |
+| 512 | 25.5 | 16.0 | 17.5 | 16.6 | 7.8 |
+| 1024 | 16.2 | 16.2 | 17.9 | 16.9 | 7.0 |
+| 4096 | 9.8 | 16.8 | 16.1 | 16.1 | |
+| 16384 | 8.5 | 10.1 | 10.1 | 9.9 | |
 
 Every access in this table is a 128-bit vector per thread except where
-marked. No variant spills at any shape in the matrix. Five things this
-already settles (diary H3, H4, H12, H13, H14):
+marked. No variant spills at any shape in the matrix. Six things this
+already settles (diary H3, H4, H12, H13, H14, H15):
 
 - The naive kernel's problem on long rows is register-capped occupancy, not
   spilling: 218 registers per thread at N = 16384 leaves room for 2 programs
@@ -268,6 +286,19 @@ already settles (diary H3, H4, H12, H13, H14):
   [BLOCK_M, N] tile removes it at the cost of BLOCK_M times the weight-load
   requests from L1 (H14b). Which is faster is a timing question, so the
   tile load is a candidate variant, not a change to v3.
+- On short rows the instruction stream is mostly fixed cost, and the
+  multirow design does not touch it. Reading the SASS of v1 at N = 512: 128
+  instructions per thread for 8 elements, of which about 65 are prologue,
+  cross-warp reduction (shared memory and two barriers) and the division by
+  N, and 8 per element are the work. v3's thread does the same work plus the
+  layout change, 17.5 per element against v1's 16.0, so H6's predicted 1.3-2x
+  has no mechanism and is withdrawn. Three fixes measured one at a time:
+  1/N from the host (-7 instructions), no mask when N is a power of two
+  (-15), one warp per row (-31% per element, no shared memory, no barrier).
+  A loop over rows in that one warp amortizes the rest: 6.6 per element at 8
+  rows, 7.8 at the 2 rows that keep 2048 warps in flight at M = 4096. That
+  shipped as `triton_v5_rowloop` (diary H15); the dispatcher waits for the
+  timing. Hand-unpacking the bf16 pairs saved 1.6% and was not adopted.
 
 ### Pending hardware: timing and profiles
 
@@ -301,6 +332,12 @@ tool already produces data here:
   and the global and shared-memory accesses in the PTX by width.
   `--no-specialize` shows the kernel a misaligned input gets; `--dump-ir DIR`
   keeps each compile's TTGIR and PTX for reading. Results in section 5.
+- `python scripts/sass_mix.py --impl <variant> --n <N>`: assembles the PTX
+  with the bundled `ptxas`, disassembles with `nvdisasm`, and counts the
+  executed SASS instructions per thread by class (loads and stores, shared
+  memory, barriers, shuffles, converts, floating point, integer and
+  predicate, uniform). Instructions per element is the compile-time proxy for
+  the instruction-bound regime (diary H15).
 - `python -m rmsnorm.cli kernels --impl torch_eager --shape 4096x4096`:
   CUDA kernels launched per call with their device time (`torch.profiler`).
   For the baseline this is the count of separate kernels and the difference

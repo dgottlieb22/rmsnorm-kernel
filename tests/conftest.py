@@ -36,6 +36,20 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_gpu)
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """A variant that does not cover a shape (``UnsupportedShape``) is a skip, not a failure.
+
+    The row-loop kernel stops at N = 1024 by design; the registry-wide
+    correctness matrix still runs it on every shape it does cover, and the
+    skip reason names the shape it does not.
+    """
+    try:
+        return (yield)
+    except rmsnorm.triton_impls.UnsupportedShape as e:
+        pytest.skip(f"variant does not cover this shape: {e}")
+
+
 @pytest.fixture(scope="session")
 def device() -> str:
     return DEVICE

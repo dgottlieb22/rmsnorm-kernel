@@ -122,8 +122,9 @@ program, one weight load per BLOCK_M rows.
 | triton_v0_naive | N in [1024, 4096], M large | N = 512 (too little per program); N >= 8192 (4 warps hold 64-128 elements per thread: 125-213 registers, so 4 then 2 programs per SM; the original guess was spills, and the offline compile in diary H3 showed register-capped occupancy instead) | fixed 4 warps regardless of N |
 | triton_v1_warps | N in [2048, 8192] | N = 512 (still one row per program) | 8 elements per thread: one 16 B load each, room for occupancy |
 | triton_v2_looped | N >= 8192 | N <= 4096 (two passes and loop overhead for no benefit) | bounded registers; second pass re-reads from L2 |
-| triton_v3_multirow | N <= 1024 | large N (fewer programs, bigger blocks) | amortizes weight load and per-program overhead |
+| triton_v3_multirow | N <= 1024 | large N (fewer programs, bigger blocks) | amortizes weight load and per-program overhead. Revised after H15: no per-thread saving over v1 (17.5 against 16.0 instructions per element at N = 512), expect within a few percent of v1 |
 | triton_v3b_wtile | N <= 1024, by a few percent over v3 if its two extra barriers cost more than BLOCK_M re-reads of the weight from L1 | nowhere distinct from v3; identical code at BLOCK_M = 1 | same tile as v3, weight read in the tile's layout: no shared-memory layout change (diary H14, H14b) |
+| triton_v5_rowloop | N <= 1024 at M in the thousands and up: the short-row kernel to beat | M = 64 (a grid of 64 warps); N > 1024 (not covered) | one warp per row, no barrier, prologue and weight amortized over ROWS rows: half of v1's instructions per element, at 50% (block limit) or 39% (registers, N = 1024) theoretical occupancy (diary H15) |
 | triton (dispatch) | all N, by construction | M = 1 vs the best single kernel (dispatch costs host time) | chooses by N |
 | triton_v4_fused_residual | all shapes vs the unfused pair | vs vLLM's CUDA kernel: unknown | 20% fewer bytes, one launch instead of two or more |
 
