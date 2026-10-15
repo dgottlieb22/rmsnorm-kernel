@@ -49,8 +49,12 @@ Protocol, implemented in `rmsnorm/bench.py`:
 3. For each of 5 rounds: 25 more warmup calls, then 100 timed calls. Each call
    is bracketed by its own pair of CUDA events. In `cold` mode a 256 MB buffer
    is zeroed before each call so the inputs are evicted from L2 and come from
-   HBM, as they would in a forward pass where the previous layer's outputs
-   have long been evicted. `warm` mode skips the flush.
+   HBM. This is the conservative number, not a claim about what a forward
+   pass sees: a norm's input is the residual stream the preceding kernel just
+   wrote (32 MB at 4096 x 4096 bf16, against a 50 MB L2 on an A100 or H100),
+   and how much of it is still resident depends on the shape and on what ran
+   in between, which this harness does not measure. `warm` mode skips the
+   flush; the two together bound the real case.
 4. Report the median over the 500 samples, the interquartile range, the
    minimum, and the spread of the 5 per-round medians. A spread above a few
    percent means the number is not stable (clock changes, other tenants) and
@@ -77,13 +81,12 @@ for the fused one.
 
 ## Things this harness refuses to do
 
-Each of these produces a flattering and wrong number, and each has appeared
-in a published kernel benchmark:
+Each of these produces a flattering and wrong number:
 
 - Timing with a warm L2 and calling it bandwidth. A 2 MB working set never
-  leaves the 50 MB L2; the "bandwidth" reported is L2 bandwidth, two to three
-  times HBM. The harness defaults to cold and reports warm separately so the
-  difference is visible.
+  leaves the 50 MB L2; the "bandwidth" reported is L2 bandwidth, not HBM's.
+  How far off that is for this operation is H10. The harness defaults to cold
+  and reports warm separately so the difference is visible.
 - Timing with the host clock and no synchronization: measures launch cost,
   not the kernel.
 - Including the first call: measures compilation.
@@ -95,7 +98,8 @@ in a published kernel benchmark:
   kernels (vLLM, Liger, flash-attn, when installed) are timed on the same
   matrix, and the report prints them whether or not they win.
 - Reporting speedups without absolute times and bandwidth. A 5x speedup at
-  M = 1 is 40 us against 8 us of launch overhead, and says nothing about the
+  M = 1 could be, say, 40 us of eager launches against 8 us for one launch
+  (illustrative numbers, not measured), and would say nothing about the
   kernel.
 - Dropping the Python overhead. At small shapes the wrapper is the cost; it
   is measured and reported.

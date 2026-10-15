@@ -8,18 +8,20 @@ number. It is being able to say, for every implementation and every shape,
 why it runs as fast as it does, and to show the measurement that supports
 the claim.
 
-Status, stated plainly: the implementations, the correctness suite (1141
-tests; 994 run on a CPU-only host, the rest need a GPU or a working
-`torch.compile`), the benchmark harness, the profiling tooling and the
-performance model are complete. This was built on a machine without a GPU;
-the Triton kernels were verified through Triton's CPU interpreter, and their
-register, spill and occupancy figures were obtained by compiling them offline
-for sm_80 and sm_90 (section 5). No benchmark or profile has been run. Every
-section that needs measured timings says PENDING HARDWARE, and
-`docs/diary.md` holds the hypotheses written down before the measurements so
-that the predictions cannot be adjusted after the fact (one already had to
-be corrected by the compile-time data). `scripts/run_all.sh` produces
-everything on a CUDA host.
+Status, stated plainly: the implementations and the correctness suite
+(1375 tests; 1190 run on a CPU-only host, the skips being `torch.compile`
+cases this host cannot build, GPU-only tests, and shapes a variant declares
+it does not cover) are done. The benchmark harness, the profiling
+tooling and the performance model are written and unit-tested on the CPU; none
+of them has run on a GPU. This was built on a machine without a GPU; the
+Triton kernels were verified through Triton's CPU interpreter, and their
+register, spill, occupancy and instruction-count figures were obtained by
+compiling them offline for sm_80 and sm_90 (section 5). No benchmark or
+profile has been run. Every section that needs measured timings says PENDING
+HARDWARE, and `docs/diary.md` holds the hypotheses written down before the
+measurements so that the predictions cannot be adjusted after the fact (three
+have already been corrected by the compile-time data: H3, H4, H6).
+`scripts/run_all.sh` produces everything on a CUDA host.
 
 ## 1. The operation and why it matters
 
@@ -31,22 +33,22 @@ y[i] = x[i] / sqrt(mean_j(x[j]^2) + eps) * w[i]
 ```
 
 Unlike LayerNorm it subtracts no mean, so a row needs one reduction, not
-two. Llama, Mistral, Gemma, Qwen and most current decoder models use it
-twice per layer (before attention and before the MLP), and in a decoder
-layer it follows the residual add, so production servers fuse
-`residual + x` into it (vLLM's `fused_add_rms_norm`).
+two. Llama, Mistral, Gemma and Qwen use it twice per layer (before attention
+and before the MLP), and in a decoder layer it follows the residual add, so
+serving stacks fuse `residual + x` into it (vLLM's `fused_add_rms_norm`).
 
 It matters for inference for two reasons that pull in opposite directions.
 It is small: 4 float32 operations per element against 4 bytes of traffic in
-bf16, so it is memory-bound on any GPU by a factor of 10-20 (see
-`docs/performance-model.md`), and a good kernel simply streams the row at
-HBM bandwidth. And it runs at every shape the model sees: at decode (one
-token per sequence, M in the tens) it is a few kilobytes and the launch is
-the cost; at prefill (M in the thousands) it is tens of megabytes and the
-memory system is the cost. The same kernel moves between regimes as the
-shape changes, which is what makes it a good object of study: a kernel that
-is "fast" at one shape and the explanation for why it is slow at another are
-both one page of code.
+bf16, so on an A100 or H100 it sits 10-20x below the ridge point and cannot
+be compute-bound (spec-sheet arithmetic in `docs/performance-model.md`
+section 1); the model's expectation, untested here, is that a good kernel
+streams the row at close to copy bandwidth. And it runs at every shape the
+model sees: at decode (one token per sequence, M in the tens) it is a few
+kilobytes, and the model predicts the launch is the cost (diary H11); at
+prefill (M in the thousands) it is tens of megabytes and the memory system
+should be. The same kernel moves between regimes as the shape changes, which
+is what makes it a good object of study: a kernel that is fast at one shape,
+and the explanation for why it is slow at another, are both one page of code.
 
 ## 2. Implementations
 
@@ -65,10 +67,12 @@ def rmsnorm_torch_eager(x, weight, eps=1e-6):
     return (h * weight.to(torch.float32)).to(x.dtype)
 ```
 
-Correct, readable, and the way most model code is written. Every line is a
-separate CUDA kernel and every intermediate is a full-size float32 tensor
-that goes out to HBM and comes back. The profiler section counts the kernels
-and the bytes.
+Correct and readable. In eager mode each operation is its own CUDA kernel
+and each intermediate (`x.float()`, the square, the normalized tensor, the
+scaled tensor) is a full-size float32 tensor. How many kernels that is, and
+how much of the intermediate traffic reaches HBM rather than staying in L2,
+is diary H1, pending hardware; the model's guess is 8-10 kernels and several
+times the operation's traffic at large shapes.
 
 Two more PyTorch baselines sit beside it: `torch_eager_hf`, the Hugging Face
 `LlamaRMSNorm` ordering (round to bf16, then multiply by the weight: two
@@ -77,10 +81,11 @@ torch >= 2.4, the library's own implementation.
 
 ### torch.compile (`torch_compiled`)
 
-`torch.compile(rmsnorm_torch_eager)`. On CUDA, TorchInductor emits a Triton
-kernel for the fused graph, so this comparison is Triton against Triton: the
-compiler's generic reduction template against kernels written for this one
-operation.
+`torch.compile(rmsnorm_torch_eager)`. On CUDA, TorchInductor compiles the
+graph to its own Triton kernels, so this comparison is Triton against Triton:
+the compiler's generic reduction template against kernels written for this
+one operation. Whether Inductor fuses the whole graph into one kernel or two
+is diary H2; `torch.compile` has not run on this host.
 
 ### Triton kernels (`rmsnorm/triton_impls.py`)
 
@@ -89,8 +94,7 @@ performance to one change in code.
 
 - `triton_v0_naive`: one program per row, the whole row in one block of
   `next_power_of_2(N)` lanes, 4 warps for every N. The first kernel anyone
-  writes; its failure modes at N = 512 and N = 16384 are the first two
-  diary entries.
+  writes; what the compiler does with it at N = 512 and N = 16384 is diary H3.
 
   ```python
   @triton.jit
@@ -112,19 +116,21 @@ performance to one change in code.
 - `triton_v1_warps`: the same kernel with `num_warps` chosen so each thread
   owns about 8 elements (one 16-byte load). Thread mapping only.
 - `triton_v2_looped`: the row processed in 4096-wide chunks in two passes
-  (sum of squares, then normalize). Register use no longer grows with N; the
-  second pass re-reads the row from L2.
+  (sum of squares, then normalize). Register use no longer grows with N (32
+  registers out to N = 65536, measured); the second pass re-reads the row,
+  from L2 if it is still resident there, which is unmeasured.
 - `triton_v3_multirow`: several short rows per program as a 2-D block; the
-  weight is loaded once per program and every thread has more independent
-  loads in flight. The once-per-program weight load is narrow (one element
-  per thread at N = 512) and the compiler moves it through shared memory
-  into the tile's layout, with two extra barriers; diary H14 traces that in
-  the IR and H14b compiles the alternatives.
+  weight is loaded once per program and the grid is BLOCK_M times smaller.
+  The once-per-program weight load is narrow (one element per thread at
+  N = 512) and the compiler moves it through shared memory into the tile's
+  layout, with two extra barriers; diary H14 traces that in the IR and H14b
+  compiles the alternatives. The SASS counts in H15 show its thread does the
+  same per-element work as v1's plus that layout change.
 - `triton_v3b_wtile`: v3 with the weight read as a `[BLOCK_M, BLOCK_N]` tile
   (row stride 0), so it arrives in the x tile's layout: no shared-memory
   layout change, two fewer barriers, BLOCK_M times the weight-load requests
-  from L1. Same arithmetic as v3, bit-identical output; which is faster is
-  H6c.
+  per program. Same arithmetic as v3, bit-identical output; which is faster
+  is H6c.
 - `triton_v5_rowloop`: one warp per program, ROWS rows one after another,
   weight loaded and converted once, 1/N from the host, no mask when the shape
   allows it. Built from the SASS counts in diary H15: a one-warp row has no
@@ -142,8 +148,10 @@ performance to one change in code.
   diary's measurements replace them.
 
 All kernels square and accumulate in float32 whatever the storage dtype, and
-every load is masked to N so non-power-of-two hidden sizes (5120, 11008)
-are handled without padding the tensors. Strides and N are passed divided by
+every load is masked to N (v5 drops the mask when N is a power of two and M
+a multiple of ROWS, which is when there is nothing to mask) so
+non-power-of-two hidden sizes (5120, 11008) are handled without padding the
+tensors. Strides and N are passed divided by
 a compile-time `ALIGN` and multiplied back inside the kernel, so the compiler
 can prove 16-byte alignment for hidden sizes like 1000 that the launcher's
 own divisible-by-16 hint misses (section 5 and diary H12 show what that
@@ -252,10 +260,14 @@ Every access in this table is a 128-bit vector per thread except where
 marked. No variant spills at any shape in the matrix. Six things this
 already settles (diary H3, H4, H12, H13, H14, H15):
 
-- The naive kernel's problem on long rows is register-capped occupancy, not
-  spilling: 218 registers per thread at N = 16384 leaves room for 2 programs
-  of 4 warps per SM. The model's first guess (spills) was wrong and is
-  corrected in the diary, not erased.
+- The naive kernel's problem on long rows inside the matrix is
+  register-capped occupancy, not spilling: 218 registers per thread at
+  N = 16384 leaves room for 2 programs of 4 warps per SM. The model's first
+  guess (spills) was wrong and is corrected in the diary, not erased. One
+  doubling further out it comes true: at N = 32768 `v0` spills 3.1 KB per
+  thread and `v1` is at 121 registers and 25% occupancy; at 65536 both spill
+  (`docs/results/aot_stats_bf16_longrows.md`, diary H3). `v2` is at 32
+  registers and 100% at every N up to 65536.
 - The 8-elements-per-thread heuristic holds registers at 26 wherever it can
   reach 8; once the 16-warp cap forces 16 and 32 elements per thread
   (N >= 8192) occupancy drops to 75% and 50%. The looped kernel is flat at 32
@@ -284,7 +296,8 @@ already settles (diary H3, H4, H12, H13, H14, H15):
   (diary H14). Loading the weight as a [1, N] block does not remove the
   conversion and doubles the shared memory; loading it as a full
   [BLOCK_M, N] tile removes it at the cost of BLOCK_M times the weight-load
-  requests from L1 (H14b). Which is faster is a timing question, so the
+  requests per program, all but the first touch of each line expected to hit
+  L1 (H14b). Which is faster is a timing question, so the
   tile load is a candidate variant, not a change to v3.
 - On short rows the instruction stream is mostly fixed cost, and the
   multirow design does not touch it. Reading the SASS of v1 at N = 512: 128
@@ -364,49 +377,54 @@ numbers and what each one implies for this operation.
 `docs/performance-model.md`. The short version: RMSNorm moves 4 bytes per
 element in bf16 and does 4 float32 operations on it, an arithmetic intensity
 of about 1 flop per byte against ridge points of 10 (A100) to 20 (H100)
-flop per byte, so it is memory-bound by construction. The time floor is
-bytes / achievable bandwidth: 67 MB for 4096 x 4096, about 38 us on an A100
-and 23 us on an H100 at typical copy bandwidth. Where a kernel does not
+flop per byte from the spec sheets, so it is memory-bound by construction.
+The time floor is bytes / achievable bandwidth: 67 MB for 4096 x 4096, about
+38 us on an A100 and 23 us on an H100 if copy bandwidth is 85-90% of spec,
+which is assumed until the benchmark measures it. Where a kernel does not
 reach the floor, the model names four regimes and what to measure in each:
 bandwidth-bound (coalescing, redundant traffic), parallelism-bound (bytes in
 flight per Little's law: occupancy, loads per thread, grid smaller than the
 machine), launch-bound (host issue cost against a kernel of a few
 microseconds), and instruction-bound (short rows where fixed per-program
-work and masked lanes dominate). Section 4 of that document predicts, per
-variant, where each should win and lose; the diary checks every prediction.
+work and masked lanes dominate). The model opens with a table of every
+number it assumes and which diary entry measures it. Section 4 of that
+document predicts, per variant, where each should win and lose; the diary
+checks every prediction.
 
 ## 8. Failed and abandoned experiments
 
-None yet; nothing has been run. `docs/diary.md` has a section reserved for
-them, and the candidates not yet built (autotuning, a CUDA kernel, a
-split-row kernel for small M with long rows) are listed there with the
-measurement that would justify each.
+Four so far, all at compile time, in the diary's last section: loading the
+multirow weight as a [1, N] block (conversion stays, shared memory doubles),
+`tl.multiple_of` on scalar arguments (no effect on the PTX), the row loop
+with two warps per row (a barrier pair per row), and hand-unpacked bf16 with
+`tl.join` (a layout change: 1 KB of shared memory and 31 barriers). The
+candidates not yet built (autotuning, a CUDA kernel, a split-row kernel for
+small M with long rows) are listed there with the measurement that would
+justify each.
 
 ## 9. Conclusions
 
-Pending the measurements. What can be said from the model alone: the
-operation cannot be compute-bound on current GPUs; the eager baseline's
-cost is launches and float32 intermediates, not arithmetic; the whole-row
-Triton design is the right one for N between about 1024 and 16384 and
-the wrong one below (per-program overhead) and above (registers); fusing
-the residual add is worth at most 1.25x in the bandwidth-bound regime; and
-at decode shapes no kernel change matters as much as the number of launches
-per layer.
+Pending the measurements. The compile-time facts are in section 5 and the
+model's predictions in `docs/performance-model.md` section 4; nothing here
+is a timing conclusion yet, and this section stays empty until one is.
 
 ## 10. Interview questions this project answers
 
-| question | where the answer is |
-|---|---|
-| Why is this kernel memory-bound? | model section 1 (1 flop/byte vs a 10-20 flop/byte ridge); ncu DRAM throughput vs SM throughput (H3) |
-| What changed when you altered the tile size? | H4 (warps per row), H5b (chunk width), H6b (rows per program); `stats` output for registers and occupancy |
-| What does occupancy mean here? | model section 3 (resident warps vs the limit, which resource binds, Little's law for bytes in flight); `stats` limiter column |
-| Why is your kernel faster at hidden size 4096 but slower at 512? | model section 3 (instruction-bound regime), H3 and H6 |
-| Why does the naive kernel degrade at N = 16384? | H3, measured at compile time: 218 registers per thread caps residency at 2 programs x 4 warps per SM (12.5% occupancy); no spills. The timing half is pending |
-| Why do alignment hints matter, and what did you do about them? | H12, measured at compile time: with the hints each thread does 128-bit accesses; without them 16-bit scalars, 255 registers and spills on the longest row. Passing strides and N divided by a compile-time ALIGN restored 128-bit accesses for N = 1000 |
-| When does fusion help and by how much? | model section 1 (4 vs 5 bytes per element), H9 |
-| Why not trust a warm-cache benchmark? | H10 and the methodology |
-| Why is M = 1 slow for every implementation? | H11: launch-bound; host time vs GPU time table |
-| How do you know your tolerance is right? | section 3: mutants that fail, correct orderings that pass |
+| question | where the answer is | status |
+|---|---|---|
+| Why is this kernel memory-bound? | model section 1: 1 flop/byte against a 10-20 flop/byte ridge | spec-sheet arithmetic; the ncu DRAM-vs-SM throughput check is pending (H3) |
+| What changed when you altered the tile size? | H4 (warps per row): registers track elements per thread, the limiter moves from registers to warps; H16 (warps per program under Gluon): blocks-vs-barriers becomes registers-vs-instructions | measured at compile time; the H5b and H6b timing sweeps are pending |
+| What does occupancy mean here? | model section 3 (resident warps over the limit, which resource binds, Little's law for bytes in flight); the limiter column in the `aot` tables | compile-time measured for every variant; achieved occupancy pending |
+| What does a short row cost that a long one does not? | H15: 65 fixed instructions per thread against 8 per element, where they go, and the kernel that halves them | measured at compile time; whether it shows up in time is H6, pending |
+| Why does the naive kernel degrade at N = 16384? | H3: 218 registers per thread caps residency at 2 programs x 4 warps per SM (12.5% occupancy), no spills; spills start at 32768 | measured at compile time; the timing half is pending |
+| What did the compiler do with the multirow kernel's weight? | H14, H14b: a layout conversion through 2N bytes of shared memory with two barriers, read off the TTGIR and PTX, and two alternatives compiled | measured at compile time |
+| Why do alignment hints matter, and what did you do about them? | H12: with the hints each thread does 128-bit accesses; without them 16-bit scalars, 255 registers and spills on the longest row; passing strides and N divided by a compile-time ALIGN restored 128-bit accesses for N = 1000 | measured at compile time |
+| When does fusion help and by how much? | model section 1: at most 1.25x from bytes alone | derived bound; the measurement is H9, pending |
+| How do you know your tolerance is right? | section 3: mutants that fail, correct orderings that pass | measured on the CPU |
+
+Questions whose answers are entirely pending (why not trust a warm-cache
+number, why M = 1 is slow for every implementation) are H10 and H11 and are
+not listed until they have data.
 
 ## 11. How to run
 
@@ -414,7 +432,7 @@ CPU (correctness only; Triton kernels run through the interpreter):
 
 ```
 make venv-cpu      # torch 2.8.0+cpu from the PyTorch CPU index, triton 3.4.0
-make test          # 994 pass here; torch.compile tests skip when the host cannot build C++ extensions
+make test          # 1190 pass, 185 skip here; torch.compile tests skip when the host cannot build C++ extensions
 ```
 
 GPU:
@@ -435,7 +453,7 @@ Single commands: `python -m rmsnorm.cli --help`; `bench`, `report`, `stats`,
 ```
 rmsnorm/reference.py      float64 oracle (plain and fused-residual)
 rmsnorm/torch_impls.py    eager, HF ordering, F.rms_norm, torch.compile
-rmsnorm/triton_impls.py   kernels v0-v4, dispatcher, launch recording for stats
+rmsnorm/triton_impls.py   kernels v0-v5 (v3b, v5 included), dispatcher, launch recording for stats
 rmsnorm/external.py       vLLM / Liger / flash-attn adapters (optional)
 rmsnorm/tolerance.py      dtype-derived tolerances and error metrics
 rmsnorm/bench.py          timing protocol, traffic model, copy roofline, CSV
@@ -445,7 +463,7 @@ rmsnorm/aot_stats.py      the same from offline compilation + ptxas, for a chose
 rmsnorm/profile.py        nsys/ncu target, torch.profiler kernel table
 rmsnorm/cli.py            command line
 tests/                    correctness matrix, mutants, numerics pins, harness, GPU-only
-scripts/                  run_all.sh, ncu.sh, nsys.sh, ncu_summary.py
+scripts/                  run_all.sh, ncu.sh, nsys.sh, ncu_summary.py, sass_mix.py, probe_h14b/h15/h16 compile-time probes
 docs/performance-model.md predictions and the regimes
 docs/methodology.md       how correctness and timing are done, and what is refused
 docs/diary.md             one hypothesis per experiment; compile-time results in; timings pending hardware

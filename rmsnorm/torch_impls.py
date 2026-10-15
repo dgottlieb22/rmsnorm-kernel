@@ -3,9 +3,10 @@
 Three eager formulations and the compiled version of the first:
 
 * ``rmsnorm_torch_eager``: upcast to float32, normalize, multiply by the
-  weight in float32, round to the input dtype once. This is also what
-  ``torch.nn.functional.rms_norm`` computes (ATen's composite implementation
-  does the weight multiply in the upcast dtype and casts at the end).
+  weight in float32, round to the input dtype once. On CPU with torch 2.8
+  this matches ``torch.nn.functional.rms_norm`` bit for bit
+  (``tests/test_torch_impls.py``), which says ATen's composite also multiplies
+  by the weight before the final cast; ATen's source was not read.
 * ``rmsnorm_torch_eager_hf``: the formulation in Hugging Face's
   ``LlamaRMSNorm``: round the normalized activations back to the input dtype
   first, then multiply by the (bf16) weight. Two roundings instead of one;

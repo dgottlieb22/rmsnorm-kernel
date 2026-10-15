@@ -1,7 +1,7 @@
 """Vendor RMSNorm implementations, registered when their package is importable.
 
-These are the implementations a production server would actually use, and the
-honest comparison for the hand-written kernels. None of them is a dependency;
+These are the kernels serving stacks ship, and the comparison the hand-written
+kernels are measured against. None of them is a dependency;
 each adapter is attempted at import and silently skipped when the package is
 missing. The adapters were written against the public signatures of the
 versions named below and have not been run on this machine (no GPU, packages

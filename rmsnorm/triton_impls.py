@@ -13,8 +13,8 @@ variants, in the order they were written:
   (sum of squares, then normalize). Trades a second read of the row (served
   from L2) for a bounded register footprint on long rows.
 * ``v3_multirow``: several short rows per program as a 2-D block, so the
-  weight is loaded once per program and every thread has more independent
-  loads in flight.
+  weight is loaded once per program and the grid is BLOCK_M times smaller.
+  The SASS counts in diary H15 show no per-thread saving over ``v1_warps``.
 * ``v3b_wtile``: v3 with the weight read as a [BLOCK_M, BLOCK_N] tile, so it
   arrives in the x tile's layout and skips the shared-memory layout change the
   1-D load needs (diary H14, H14b).
@@ -52,8 +52,10 @@ except ImportError:  # pragma: no cover
 
 HAS_TRITON = triton is not None
 
-# Largest row a single-block kernel will take. Beyond this the block no longer
-# fits in registers in any useful way and ``v2_looped`` is the right tool.
+# Largest row a single-block kernel will take. Measured at compile time (diary
+# H3): ``v0_naive`` already spills 3 KB per thread at N = 32768, and ``v1_warps``
+# hits its 128-register cap and spills from N = 65536. ``v2_looped`` holds 32
+# registers at every N and is the right tool well before this limit.
 MAX_SINGLE_BLOCK_N = 65536
 
 
@@ -155,8 +157,9 @@ if HAS_TRITON:
 
         Pass 1 accumulates x*x into a BLOCK_N-wide float32 vector and reduces
         it once at the end (one cross-warp reduction per row, not one per
-        chunk). Pass 2 re-reads the row, which by then sits in L2, and writes
-        the output. Register use is bounded by BLOCK_N, not by N.
+        chunk). Pass 2 re-reads the row (from L2 when it is still resident
+        there, which is not measured) and writes the output. Register use is
+        bounded by BLOCK_N, not by N.
         """
         stride_xm = stride_xm_div * ALIGN
         stride_ym = stride_ym_div * ALIGN

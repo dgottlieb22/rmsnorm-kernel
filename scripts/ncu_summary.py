@@ -11,8 +11,13 @@ metrics below are the ones the README's profiler section interprets:
 - SM throughput: compute pressure (expected low for RMSNorm).
 - Achieved and theoretical occupancy, registers per thread, the occupancy
   limiter: can the SM hold enough warps to cover memory latency?
-- L1/TEX sectors per request for global loads: 4.0 means perfectly coalesced
-  128-byte requests; higher means wasted sectors.
+- L1/TEX sectors per request for global loads, derived from the sector and
+  request sums: a fully coalesced warp request uses one 32-byte sector per 32
+  bytes it asks for, so the ideal equals the bytes per lane (4 for 32-bit
+  lanes, 16 for the 128-bit loads these kernels issue); higher means wasted
+  sectors. The ``smsp__sass_average_data_bytes_per_sector...pct`` metric is
+  reported too, under its own name: it is the percentage of each fetched
+  sector's bytes that the warp used, not a sector count.
 - Local memory traffic: register spills show up here.
 - Duration, so the table stands on its own.
 
@@ -43,7 +48,7 @@ METRICS = [
     ("Occupancy limit: registers", "launch__occupancy_limit_registers"),
     ("Occupancy limit: warps", "launch__occupancy_limit_warps"),
     ("Occupancy limit: blocks", "launch__occupancy_limit_blocks"),
-    ("Global load sectors / request", "smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct"),
+    ("Global load: bytes used per sector (%)", "smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct"),
     ("L1 global load sectors", "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum"),
     ("L1 global load requests", "l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum"),
     ("Local load sectors (spills)", "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum"),
@@ -80,12 +85,13 @@ def render(launches) -> str:
             else:
                 out.append(f"| {label} | - |")
         # Derived: sectors per request for global loads, if both are present.
+        # Ideal = bytes per lane: 4 for 32-bit lanes, 16 for 128-bit lanes.
         s = metrics.get("l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum")
         r = metrics.get("l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum")
         if s and r:
             try:
                 ratio = float(s[0].replace(",", "")) / float(r[0].replace(",", ""))
-                out.append(f"| Sectors per global load request (derived; 4 = fully coalesced 32-bit lanes) | {ratio:.2f} |")
+                out.append(f"| Sectors per global load request (derived; fully coalesced = bytes per lane, 16 for 128-bit loads) | {ratio:.2f} |")
             except (ValueError, ZeroDivisionError):
                 pass
         out.append("")

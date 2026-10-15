@@ -17,6 +17,11 @@ produced.
 - `aot_stats_bf16_nohints.csv` / `.md`: v0 and v1 at N = 4096 and 16384 on
   sm_80 compiled without the pointer and integer divisibility hints
   (`--no-specialize`), the code a misaligned input gets. Diary H12.
+- `aot_stats_bf16_longrows.csv` / `.md`: v0, v1 and v2 at N = 16384, 32768
+  and 65536 on sm_80, bf16, M = 4096, from
+  `python -m rmsnorm.cli aot --impl triton_v0_naive --impl triton_v1_warps --impl triton_v2_looped --n 16384 --n 32768 --n 65536 --arch sm_80 --out docs/results/aot_stats_bf16_longrows.csv`.
+  Where the single-block kernels start to spill, outside the benchmark
+  matrix. Diary H3 and H13.
 - The IR behind diary H14 and H14b is not committed; regenerate it with
   `python -m rmsnorm.cli aot --impl triton_v3_multirow --n 512 --arch sm_80 --dump-ir <dir>`
   and `python scripts/probe_h14b_weight_load.py --ir`.

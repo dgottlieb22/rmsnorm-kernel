@@ -35,8 +35,6 @@ DRAM bytes read+written vs the 67.1 MB model.
 
 Result: PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
 ## H2. torch.compile closes most of the gap, except at M = 1
@@ -57,8 +55,6 @@ python -m rmsnorm.cli kernels --impl torch_compiled --shape 4096x4096
 Read: GPU us and host us columns at M = 1 and M = 4096.
 
 Result: PENDING HARDWARE.
-
-Explanation: PENDING HARDWARE.
 
 ---
 
@@ -98,6 +94,27 @@ full table in `docs/results/aot_stats_bf16.md`):
 (The v0 row at 16384 read 213 registers before the ALIGN change of H12 added
 three multiplies; the occupancy did not move.)
 
+Outside the matrix (compiled 2026-10-15, sm_80, bf16, M = 4096;
+`docs/results/aot_stats_bf16_longrows.md`):
+
+| N | v0: registers / spill B (st/ld) / occupancy | v1: registers / spill / occupancy | v2: registers / spill / occupancy |
+|---|---|---|---|
+| 16384 | 218 / 0 / 12.5% | 63 / 0 / 50% | 32 / 0 / 100% |
+| 32768 | 32 / 3122/3104 / 100% | 121 / 0 / 25% | 32 / 0 / 100% |
+| 65536 | 32 / 6014/5928 / 100% | 128 / 300/300 / 25% | 32 / 0 / 100% |
+
+So the spill prediction comes true one doubling past the matrix. At
+N = 32768 v0 spills 3 KB per thread, and ptxas answers by holding the kernel
+at 32 registers (16 programs per SM, 100% theoretical occupancy, every
+element staged through local memory); why it does not use up to 255
+registers before spilling is not known, and the PTX carries no `.maxnreg`.
+v1 at 512 threads is capped at 128 registers by the register file
+(65536 / 512) so one program fits per SM: 121 registers and no spill at
+32768, 128 and a 300-byte spill at 65536. v2 holds 32 registers throughout
+(H13). `MAX_SINGLE_BLOCK_N = 65536` therefore marks where even v1 spills, not
+where the single-block design starts to cost; the dispatcher hands rows above
+`LOOPED_MIN_N` to v2 well before either.
+
 The spill prediction was wrong: with the alignment hints the launcher passes
 (see H12), the compiler fits N = 16384 in about 215 registers with no spill. What
 does happen is that registers cap residency at 2 programs x 4 warps = 8
@@ -111,11 +128,12 @@ tail of each program), not the collapse first predicted.
 
 Result (timing): PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
-## H4. Scaling num_warps to the row (8 elements per thread) removes the spills and changes little else
+## H4. Scaling num_warps to the row (8 elements per thread) moves the limiter from registers to warps
+
+(Title revised after the compile; it first read "removes the spills and
+changes little else". The hypothesis below is as written.)
 
 Hypothesis: `triton_v1_warps` picks `num_warps = BLOCK_N / 256`, capped at 16.
 At N = 16384 that is 16 warps: 32 elements per thread, about 100 registers,
@@ -158,11 +176,15 @@ thread in flight against 100% with 8), and a coin flip at 512.
 
 Result (timing): PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
-## H5. Two passes over the row (looped kernel) only pay off where the single block spills
+## H5. Two passes over the row (looped kernel): a second read against bounded registers
+
+(Title revised; it first read "only pay off where the single block spills".
+The hypothesis below is as written, and H13 added a second mechanism it does
+not cover: v2 holds 100% theoretical occupancy where v1 is at 50% at
+N = 16384 and 25% at 32768. Whether that buys back the second pass is now
+part of this entry's question.)
 
 Hypothesis: `triton_v2_looped` (chunks of 4096, sum-of-squares pass then
 normalize pass) bounds registers independent of N. Where v1 does not spill
@@ -190,11 +212,12 @@ from a short script (the CLI exposes the default only).
 
 Result: PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
-## H6. Several rows per program wins at N <= 1024 and loses at small M
+## H6. Several rows per program: does it win at N <= 1024?
+
+(Title revised after H15; it first read "wins at N <= 1024 and loses at small
+M". The hypothesis below is as written; the revision follows it.)
 
 Hypothesis: `triton_v3_multirow` with BLOCK_M = 4096 / BLOCK_N rows per
 program (8 rows at N = 512) loads the weight once per 8 rows instead of once
@@ -241,8 +264,6 @@ for v5's ROWS sweep, `rmsnorm_triton_v5_rowloop(x, w, eps, rows=...)`.
 
 Result: PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
 ## H7. Masked lanes at non-power-of-two N cost instructions, not bandwidth
@@ -267,8 +288,6 @@ predicated-off lanes in ncu's instruction statistics.
 
 Result: PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
 ## H8. Small M with long rows is grid-bound; only splitting rows across programs can fix it
@@ -280,7 +299,8 @@ makes it worse. A split-row design (each program reduces a chunk, partial
 sums combined through a second tiny kernel or atomics, then a normalize
 pass) would use every SM at the cost of a second launch or a global
 synchronization; whether that is worth it for a 2 MB operation that takes a
-few microseconds is doubtful, and the answer decides whether a v5 is built.
+few microseconds is doubtful, and the answer decides whether a split-row
+kernel is built (it would be v6; v5 went to the row loop in H15).
 
 Change: none yet.
 
@@ -293,8 +313,6 @@ Read: waves column; bandwidth vs M at fixed N.
 
 Result: PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
 ## H9. Fusing the residual add saves 20% of the bytes and one launch
@@ -305,7 +323,8 @@ bandwidth-bound regime `triton_v4_fused_residual` is 1.15-1.25x faster than
 `torch_eager_residual`'s add plus the best plain kernel, and more at small
 shapes where the removed launch matters. Against `torch_compiled_residual`
 (Inductor fuses the add too) expect parity within 10%. Against vLLM's CUDA
-`fused_add_rms_norm`, if installed, expect parity; it is the same algorithm.
+`fused_add_rms_norm`, if installed, expect parity if it is the same algorithm
+(its source has not been read).
 
 Change: residual add inside the row kernel, rounded to the storage dtype
 before normalization so the result matches the unfused sequence.
@@ -317,8 +336,6 @@ python -m rmsnorm.cli bench --matrix full --kind residual --include-compile
 Read: speedup column against `torch_eager_residual`; bandwidth vs copy BW.
 
 Result: PENDING HARDWARE.
-
-Explanation: PENDING HARDWARE.
 
 ---
 
@@ -339,8 +356,6 @@ python -m rmsnorm.cli bench --matrix quick --cache cold --cache warm --impl trit
 
 Result: PENDING HARDWARE.
 
-Explanation: PENDING HARDWARE.
-
 ---
 
 ## H11. At M = 1 every implementation is launch-bound and the Python wrapper is the cost
@@ -349,8 +364,9 @@ Hypothesis: at 1 x 4096 the GPU time of a Triton kernel is 3-6 us but the
 host time of its wrapper (shape checks, `reshape`, Triton's launcher) is
 20-40 us; the batched column equals the host time, not the GPU time. The
 dispatcher adds a few microseconds over the variant it picks. `torch_eager`
-is 8-10 launches of host time. The practical conclusion for a serving stack
-is CUDA graphs around the whole decode step, not a faster norm kernel.
+is 8-10 launches of host time. If this holds, the practical conclusion for a
+serving stack is CUDA graphs around the whole decode step rather than a
+faster norm kernel.
 
 Change: none.
 
@@ -361,8 +377,6 @@ python -m rmsnorm.cli bench --shape 1x4096 --shape 8x4096 --shape 64x4096 --incl
 Read: the "Host launch cost vs GPU time" table in the report.
 
 Result: PENDING HARDWARE.
-
-Explanation: PENDING HARDWARE.
 
 ---
 
@@ -444,7 +458,8 @@ depend on N and occupancy stays at 100%.
 
 Result (compile-time, measured here, sm_80 and sm_90, bf16): 32 registers at
 N = 4096, 8192 and 16384 (16 warps, 4096-wide chunks), 0 spills, 4 programs
-per SM, 100% theoretical occupancy at every N. Confirmed. Whether the
+per SM, 100% theoretical occupancy at every N; the same 32 registers at
+32768 and 65536 on sm_80 (H3's long-row table). Confirmed. Whether the
 second pass over the row costs more than the occupancy buys back is H5,
 PENDING HARDWARE.
 
@@ -684,8 +699,9 @@ the reduction's 10 instructions over 16 elements.
 
 The trade is the grid. One warp per program and ROWS rows per program means
 M / ROWS warps in the whole launch; at M = 4096 and ROWS = 8 that is 512
-warps, under 5 per SM, far below the ~16 per SM the parallelism model wants.
-So ROWS has to follow M: `_rows_for` doubles ROWS only while the grid keeps
+warps, under 5 per SM, far below the ~16 per SM the parallelism model wants
+(a figure that rests on the model's assumed 600-800 ns DRAM latency; see its
+section 0). So ROWS has to follow M: `_rows_for` doubles ROWS only while the grid keeps
 at least 2048 programs (16 warps per SM on a 128-SM part), which gives
 ROWS = 2 at M = 4096 (7.8 per element) and ROWS = 8 from M = 16384 (6.6).
 This is the same trade H6 noted for v3's grid, now with a number on both

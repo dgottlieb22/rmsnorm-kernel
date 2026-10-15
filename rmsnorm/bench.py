@@ -5,9 +5,11 @@ module is the executable version of it.
 
 * GPU time per call comes from CUDA events around each call. Between calls
   in ``cold`` mode a 256 MB buffer is written to evict the inputs from L2, so
-  every timed call reads its inputs from HBM, which is where they would come
-  from in a real forward pass. ``warm`` mode skips the flush and shows what a
-  microbenchmark that forgets to flush reports.
+  every timed call reads its inputs from HBM: the conservative number.
+  Whether a forward pass finds the norm's input still in L2 depends on the
+  shape and the preceding kernels and is not measured here. ``warm`` mode
+  skips the flush and shows what a microbenchmark that forgets to flush
+  reports; the two bound the real case.
 * Measurements run in rounds. Each round does its own warmup and takes
   ``iters`` samples; the reported latency is the median over all samples and
   the round-to-round spread of the per-round medians is reported next to it.
