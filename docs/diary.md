@@ -732,6 +732,69 @@ occupancy for v5 (theoretical 50% at 512, 39% at 1024).
 
 ---
 
+## H16. An explicit layout removes the one-warp trade (compile-time, Gluon)
+
+Hypothesis: v5 runs one warp per program only because standard Triton
+chooses the thread mapping of a 2-D block itself and spreads every row
+across all the program's warps (H15 stage 1: v3's kernel with BLOCK_M = 2
+and 2 warps still carried the cross-warp reduction). Triton 3.4's Gluon
+dialect exposes the layout. `BlockedLayout(size_per_thread = [1, BLOCK_N / 32],
+threads_per_warp = [1, 32], warps_per_cta = [W, 1])` makes warp k hold row k
+of each group of W rows, so the reduction along the row stays inside a warp
+while the program has W warps. Prediction: v5's instruction count, no
+shared memory, no barrier, and the occupancy cap moves from the 32-blocks
+limit (50%) toward 100%.
+
+Change: none to the shipped kernels; `scripts/probe_h16_gluon_rows.py`
+compiles the Gluon kernel for W in {1, 2, 4, 8} and ROWS in {1, 2, 4}. The
+offline compile needed one addition in `aot_stats`: Gluon's `make_ir` asks
+the active GPU driver for the target name, so the probe path supplies the
+target it already has.
+
+Result (compile-time, sm_80, bf16, N = 512, M = 4096; full table
+`docs/results/h16_gluon_rows_n512.md`):
+
+| kernel | warps x rows | instructions / per element | registers | smem, barriers | theoretical occupancy |
+|---|---|---|---|---|---|
+| v5 (standard Triton) | 1 x 2 | 249 / 7.78 | 48 | 0, 0 | 50% (blocks) |
+| gluon | 1 x 2 | 249 / 7.78 | 48 | 0, 0 | 50% (blocks) |
+| gluon | 4 x 2 | 260 / 8.12 | 48 | 0, 0 | 62% (registers) |
+| gluon | 4 x 1 | 155 / 9.69 | 36 | 0, 0 | 75% (registers) |
+| gluon | 4 x 4 | 474 / 7.41 | 48 | 0, 0 | 62% (registers) |
+
+With one warp the Gluon kernel compiles to the same code as v5 (249
+instructions, a check that the explicit layout is what Triton picked on its
+own there). With 4 warps per program the row reduction is still intra-warp,
+shared memory and barriers stay at zero, and the per-element count rises by
+11 instructions per program for the per-warp row index (8.12 against 7.78).
+The occupancy cap does move off the block limit, but not to 100%: 48
+registers per thread cap it at 62%, and 36 registers (ROWS = 1) at 75%. The
+registers are the two rows of x held in float32 plus the hoisted weight; the
+way to 100% would be 32 registers per thread, which means giving back either
+the hoisted weight (convert it per row, which H15 stage 2 paid to avoid) or
+the second row in flight. So the trade does not vanish, it changes shape:
+blocks versus barriers becomes registers versus instructions. At N = 1024
+the registers already bind at one warp (80 registers, 39%), and Gluon
+changes nothing there (457 against 450 instructions, 38%).
+
+Explanation: the one-warp design was never the goal, only Triton's only
+route to an intra-warp reduction on a 2-D block. Given the layout, the
+remaining limits are the ones the arithmetic predicts from register count,
+and a 16-element row slice in float32 plus its weights is 32 registers
+before any address or temporary.
+
+Not shipped. The CPU interpreter does not run Gluon kernels, so the kernel
+cannot go through the correctness matrix on this machine, and a variant that
+cannot be tested here does not get registered. On a GPU: run the probe's
+kernel through the oracle first (the H15 identity test pattern against v5),
+then time W = 4 against v5 at 4096 x 512 and 16384 x 512; the question is
+whether 62% against 50% theoretical occupancy shows up at all when both
+kernels keep two 128-bit loads per thread in flight.
+
+Result (timing): PENDING HARDWARE.
+
+---
+
 ## Candidates not yet built
 
 - `triton.autotune` over `num_warps` and `BLOCK_M`, to check whether the

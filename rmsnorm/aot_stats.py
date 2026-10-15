@@ -137,9 +137,44 @@ def compile_plan(plan: LaunchPlan, dtype: torch.dtype, m: int, n: int, arch: str
     if os.environ.get("TRITON_INTERPRET") == "1":
         raise RuntimeError("unset TRITON_INTERPRET before compiling offline; the interpreter patches the compiler")
     signature, attrs = signature_and_attrs(plan, dtype, m, n, specialize)
-    src = ASTSource(fn=plan.kernel, signature=signature, constexprs=plan.constexprs, attrs=attrs)
     target = GPUTarget("cuda", ARCHS[arch]["cc"], 32)
+    if type(plan.kernel).__name__ == "GluonJITFunction":
+        src = _OfflineGluonSource(plan.kernel, signature, plan.constexprs, attrs, target=target)
+    else:
+        src = ASTSource(fn=plan.kernel, signature=signature, constexprs=plan.constexprs, attrs=attrs)
     return triton.compile(src, target=target, options={"num_warps": plan.num_warps})
+
+
+def _gluon_source_cls():
+    from triton.experimental.gluon._runtime import GluonASTSource
+
+    class OfflineGluonSource(GluonASTSource):
+        """Gluon's ``make_ir`` asks the active driver for the target name, which needs a
+        GPU; this uses the target the caller already chose (diary H16 probe)."""
+
+        def __init__(self, fn, signature, constexprs, attrs, target):
+            super().__init__(fn, signature, constexprs, attrs)
+            self._target = target
+
+        def make_ir(self, options, codegen_fns, module_map, context):
+            from triton._C.libtriton import ir
+            from triton.compiler.code_generator import ast_to_ttir
+            from triton.compiler.compiler import make_backend
+
+            builder = ir.builder(context)
+            module = builder.create_module()
+            module.set_attr("ttg.target", builder.get_string_attr(make_backend(self._target).get_target_name(options)))
+            module.set_attr("ttg.num-warps", builder.get_int32_attr(options.num_warps))
+            module.set_attr("ttg.num-ctas", builder.get_int32_attr(options.num_ctas))
+            module.set_attr("ttg.threads-per-warp", builder.get_int32_attr(32))
+            return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+                               module_map=module_map, module=module)
+
+    return OfflineGluonSource
+
+
+def _OfflineGluonSource(*args, **kwargs):
+    return _gluon_source_cls()(*args, **kwargs)
 
 
 _USED_RE = re.compile(r"Used (\d+) registers")

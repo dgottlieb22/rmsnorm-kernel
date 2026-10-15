@@ -29,6 +29,10 @@ produced.
 - `h15_short_rows_n512.md`, `h15_short_rows_n1024.md`: the per-fix
   instruction counts behind diary H15, from
   `python scripts/probe_h15_short_rows.py --n 512 --rows 8` and `--n 1024`.
+- `h16_gluon_rows_n512.md`: the explicit-layout (Gluon) kernel against v5 at
+  N = 512 for 1 to 8 warps per program and 1, 2, 4 rows per warp, from
+  `python scripts/probe_h16_gluon_rows.py --n 512 --rows {1,2,4}`. Compile
+  time only; the kernel is not registered (diary H16).
 
 No timing or profiler data yet. Benchmark runs land under `results/` (not
 committed); the ones the text relies on get copied here after being read.
